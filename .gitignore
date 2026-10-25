@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.csv
+*.png
+*.pdf
+
+# Generated measurement data, logs, and exports
+*.txt
+*.dat
+*.log
+*.npy
+*.npz
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.xlsx
+*.docx
+
+!requirements.txt
+!CMakeLists.txt
