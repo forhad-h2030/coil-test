@@ -159,6 +159,10 @@ class LoggerThread(QThread):
                 output_cmd = "OUTPut1:STATe" if is_sma else "OUTPut:STATe"
                 self._generator = generator
                 self._output_cmd = output_cmd
+                if c["fm_enabled"]:
+                    # Match the known-working standalone SMA setup in fm_modulation.py.
+                    self._write_generator("*RST")
+                    self._write_generator("*CLS")
                 self._write_generator(f"{output_cmd} OFF")
                 self._write_generator(f"{freq_cmd} {c['source_freq_hz']:.1f}")
                 self._write_generator(f"{power_cmd} {c['source_power_dbm']:.3f}")
@@ -185,6 +189,15 @@ class LoggerThread(QThread):
                 command_fn(ser, f"rbw {c['rbw_hz'] / 1e3:g}")
                 if not self._stop:
                     self._write_generator(f"{output_cmd} ON")
+                    if c["fm_enabled"]:
+                        fm_state = self._query_generator("SOURce1:FM1:STATe?").strip().upper()
+                        lf_state = self._query_generator("SOURce1:LFOutput1:STATe?").strip().upper()
+                        rf_state = self._query_generator("OUTPut1:STATe?").strip().upper()
+                        is_on = lambda state: state in ("1", "ON")
+                        if not (is_on(fm_state) and is_on(lf_state) and is_on(rf_state)):
+                            raise RuntimeError(
+                                "Generator did not confirm FM, LF output, and RF output are ON "
+                                f"(FM={fm_state}, LF={lf_state}, RF={rf_state}).")
 
             if summary_path is not None:
                 with summary_path.open("w", newline="") as f:
