@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import csv
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,16 +91,40 @@ class LoggerThread(QThread):
         self.cfg = cfg
         self._stop = False
         self._failed = False
+        self._generator_lock = threading.Lock()
+        self._generator = None
+        self._output_cmd = None
 
     def stop(self):
         self._stop = True
+        # Disable RF independently of the analyzer sweep, which may be blocked
+        # while the tinySA returns a full trace.
+        if self._generator is not None and self._output_cmd:
+            threading.Thread(target=self._disable_generator_output, daemon=True).start()
+
+    def _write_generator(self, command_text):
+        with self._generator_lock:
+            if self._generator is not None:
+                self._generator.write(command_text)
+
+    def _query_generator(self, command_text):
+        with self._generator_lock:
+            return self._generator.query(command_text)
+
+    def _disable_generator_output(self):
+        with self._generator_lock:
+            if self._generator is not None and self._output_cmd:
+                try:
+                    self._generator.write(f"{self._output_cmd} OFF")
+                except Exception:
+                    pass
 
     def run(self):
         c = self.cfg
         ser = generator = rm = trace_f = None
         command_fn = command
         run_stamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
-        label = re.sub(r"[^A-Za-z0-9_-]+", "_", c["run_name"].strip()).strip("_") or "coil_response"
+        label = re.sub(r"[^A-Za-z0-9_-]+", "_", c["run_name"].strip()).strip("_") or "single_bin"
         stem_base = f"{label}_{run_stamp}"
         outdir = Path(c["outdir"]).expanduser()
         outdir.mkdir(parents=True, exist_ok=True)
@@ -119,8 +144,6 @@ class LoggerThread(QThread):
                 is_sma = c["generator_profile"] == "R&S SMA (internal FM)"
                 if c["fm_enabled"] and not is_sma:
                     raise RuntimeError("FM requires the R&S SMA (internal FM) generator profile.")
-                if c["fm_enabled"] and c["measurement_mode"].startswith("Coil response"):
-                    raise RuntimeError("Disable FM for stepped-source coil response; FM is used with a fixed carrier spectrum.")
                 self.status.emit("Connecting to RF generator and tinySA...")
                 rm = pyvisa.ResourceManager()
                 generator = rm.open_resource(c["visa_address"], timeout=5000)
@@ -128,31 +151,34 @@ class LoggerThread(QThread):
                 power_cmd = ("SOURce1:POWer:LEVel:IMMediate:AMPLitude" if is_sma
                              else "SOURce:POWer:LEVel")
                 output_cmd = "OUTPut1:STATe" if is_sma else "OUTPut:STATe"
-                generator.write(f"{output_cmd} OFF")
-                generator.write(f"{freq_cmd} {c['source_freq_hz']:.1f}")
-                generator.write(f"{power_cmd} {c['source_power_dbm']:.3f}")
-                c["source_freq_hz"] = float(generator.query(f"{freq_cmd}?"))
-                c["source_power_dbm"] = float(generator.query(f"{power_cmd}?"))
+                self._generator = generator
+                self._output_cmd = output_cmd
+                self._write_generator(f"{output_cmd} OFF")
+                self._write_generator(f"{freq_cmd} {c['source_freq_hz']:.1f}")
+                self._write_generator(f"{power_cmd} {c['source_power_dbm']:.3f}")
+                c["source_freq_hz"] = float(self._query_generator(f"{freq_cmd}?"))
+                c["source_power_dbm"] = float(self._query_generator(f"{power_cmd}?"))
                 if is_sma:
                     if c["fm_enabled"]:
                         waveform_scpi = {
                             "SINE": "SINE", "SQUARE": "SQUare", "PULSE": "PULSe",
                             "TRIANGLE": "TRIangle", "TRAPEZE": "TRAPeze",
                         }[c["fm_waveform"]]
-                        generator.write(f"SOURce1:LFOutput1:SHAPe {waveform_scpi}")
-                        generator.write(f"SOURce1:LFOutput1:FREQuency {c['fm_rate_hz']:.6g}")
-                        generator.write("SOURce1:FM1:SOURce LF1")
-                        generator.write(f"SOURce1:FM1:DEViation {c['fm_span_hz'] / 2:.6g}")
-                        generator.write("SOURce1:FM:MODe HBANdwidth")
-                        generator.write("SOURce1:FM1:STATe 1")
-                        generator.write("SOURce1:LFOutput1:STATe 1")
+                        self._write_generator(f"SOURce1:LFOutput1:SHAPe {waveform_scpi}")
+                        self._write_generator(f"SOURce1:LFOutput1:FREQuency {c['fm_rate_hz']:.6g}")
+                        self._write_generator("SOURce1:FM1:SOURce LF1")
+                        self._write_generator(f"SOURce1:FM1:DEViation {c['fm_span_hz'] / 2:.6g}")
+                        self._write_generator("SOURce1:FM:MODe HBANdwidth")
+                        self._write_generator("SOURce1:FM1:STATe 1")
+                        self._write_generator("SOURce1:LFOutput1:STATe 1")
                     else:
-                        generator.write("SOURce1:FM1:STATe 0")
-                        generator.write("SOURce1:LFOutput1:STATe 0")
+                        self._write_generator("SOURce1:FM1:STATe 0")
+                        self._write_generator("SOURce1:LFOutput1:STATe 0")
                 ser = open_tinysa(c["port"] or None)
                 command_fn(ser, "pause")
                 command_fn(ser, f"rbw {c['rbw_hz'] / 1e3:g}")
-                generator.write(f"{output_cmd} ON")
+                if not self._stop:
+                    self._write_generator(f"{output_cmd} ON")
 
             with summary_path.open("w", newline="") as f:
                 w = csv.writer(f)
@@ -186,8 +212,6 @@ class LoggerThread(QThread):
                     try:
                         if c["demo"]:
                             freqs, dbms = self._toy_sweep(c)
-                        elif c["measurement_mode"] == "Coil response (stepped source)":
-                            freqs, dbms = self._step_response(c, generator, ser, command_fn)
                         else:
                             pts = acquire(ser, c["start_hz"], c["stop_hz"], c["points"])
                             freqs, dbms = [p[0] for p in pts], [p[1] for p in pts]
@@ -207,13 +231,13 @@ class LoggerThread(QThread):
                     peak_mw = 10 ** (peak_dbm / 10)
                     analysis_metrics = (distribution_metrics(freqs, dbms, c["source_freq_hz"])
                                         if c["measurement_mode"] in
-                                        ("Single-tone calibration", "Modulated frequency profile") else {})
-                    if c["measurement_mode"] == "Modulated frequency profile" and analysis_metrics:
+                                        ("Single frequency", "Multiple frequency (FM)") else {})
+                    if c["measurement_mode"] == "Multiple frequency (FM)" and analysis_metrics:
                         analysis_metrics = {key: analysis_metrics[key] for key in
                                            ("bin_spacing_hz", "width_3db_hz", "width_90_hz")}
                     sigma_center_db = ""
                     sigma_adjacent_pct_points = ""
-                    if c["measurement_mode"] == "Single-tone calibration" and analysis_metrics:
+                    if c["measurement_mode"] == "Single frequency" and analysis_metrics:
                         update_running_stats(center_bin_stats, analysis_metrics["center_bin_dbm"])
                         update_running_stats(adjacent_leakage_stats, analysis_metrics["adjacent_leakage_pct"])
                         center_sigma = running_sample_std(center_bin_stats)
@@ -223,8 +247,7 @@ class LoggerThread(QThread):
                             sigma_adjacent_pct_points = f"{leakage_sigma:.6g}"
                     now = datetime.now(timezone.utc).isoformat()
                     elapsed = time.monotonic() - start_time
-                    source_start = c["start_hz"] if c["measurement_mode"].startswith("Coil response") else c["source_freq_hz"]
-                    source_stop = c["stop_hz"] if c["measurement_mode"].startswith("Coil response") else c["source_freq_hz"]
+                    source_start = source_stop = c["source_freq_hz"]
                     data_source = "toy" if c["demo"] else "hardware"
                     w.writerow([run_id, data_source, c["measurement_mode"], n, now, f"{elapsed:.3f}",
                                 c["n_sweeps"], f"{c['sweep_time']:.3f}", f"{sweep_elapsed:.3f}",
@@ -249,7 +272,7 @@ class LoggerThread(QThread):
                                        f"{fr:.1f}", f"{d:.3f}", f"{10 ** (d / 10):.9g}",
                                        f"{c['rbw_hz']:.1f}",
                                        f"{analysis_metrics.get('bin_spacing_hz', '')}",
-                                       f"{fr if c['measurement_mode'].startswith('Coil response') else c['source_freq_hz']:.1f}",
+                                       f"{c['source_freq_hz']:.1f}",
                                        f"{c['source_power_dbm']:.3f}", c["generator_profile"],
                                        c["fm_enabled"], c["fm_waveform"], f"{c['fm_rate_hz']:.6g}",
                                        f"{c['fm_span_hz']:.3f}"]
@@ -278,11 +301,11 @@ class LoggerThread(QThread):
             if generator is not None:
                 try:
                     if c["generator_profile"] == "R&S SMA (internal FM)":
-                        generator.write("SOURce1:FM1:STATe 0")
-                        generator.write("SOURce1:LFOutput1:STATe 0")
-                        generator.write("OUTPut1:STATe OFF")
+                        self._write_generator("SOURce1:FM1:STATe 0")
+                        self._write_generator("SOURce1:LFOutput1:STATe 0")
+                        self._write_generator("OUTPut1:STATe OFF")
                     else:
-                        generator.write("OUTPut:STATe OFF")
+                        self._write_generator("OUTPut:STATe OFF")
                 except Exception:
                     pass
             if ser is not None:
@@ -293,7 +316,10 @@ class LoggerThread(QThread):
                 ser.close()
             if generator is not None:
                 try:
-                    generator.close()
+                    with self._generator_lock:
+                        generator.close()
+                        if self._generator is generator:
+                            self._generator = None
                 except Exception:
                     pass
             if rm is not None:
@@ -312,7 +338,7 @@ class LoggerThread(QThread):
         peak = c["source_power_dbm"]
         freqs, dbms = [], []
         fm_weights = None
-        if c["fm_enabled"] and c["measurement_mode"] == "Modulated frequency profile":
+        if c["fm_enabled"] and c["measurement_mode"] == "Multiple frequency (FM)":
             deviation = c["fm_span_hz"] / 2
             x = (np.linspace(center - span / 2, center + span / 2, n) - c["source_freq_hz"]) / max(deviation, 1.0)
             inside = np.abs(x) <= 1.0
@@ -336,10 +362,7 @@ class LoggerThread(QThread):
                 fm_weights *= (c["rbw_hz"] / max(bin_step_hz, 1.0)) / fm_weights.sum()
         for i in range(n):
             freq = center - span / 2 + span * i / (n - 1)
-            if c["measurement_mode"].startswith("Coil response"):
-                x = 2.0 * (freq - center) / width
-                level = peak - 10.0 * np.log10(1.0 + x * x) + 0.3 * np.sin(i * 0.17)
-            elif fm_weights is not None:
+            if fm_weights is not None:
                 level = 10.0 * np.log10(max(10 ** (peak / 10) * fm_weights[i], 1e-30))
             else:
                 x = (freq - c["source_freq_hz"]) / max(c["rbw_hz"] / 2, 1)
@@ -347,22 +370,6 @@ class LoggerThread(QThread):
             freqs.append(freq)
             dbms.append(float(max(-120, level)))
         return freqs, dbms
-
-    @staticmethod
-    def _step_response(c, generator, ser, command_fn):
-        freqs, levels = [], []
-        n = c["points"]
-        freq_cmd = ("SOURce1:FREQuency:CW" if c["generator_profile"] == "R&S SMA (internal FM)"
-                    else "SOURce:FREQuency:CW")
-        for i in range(n):
-            freq = c["start_hz"] + (c["stop_hz"] - c["start_hz"]) * i / (n - 1)
-            generator.write(f"{freq_cmd} {freq:.1f}")
-            time.sleep(c["settle_ms"] / 1000.0)
-            points = acquire(ser, freq - c["rbw_hz"] / 2, freq + c["rbw_hz"] / 2, 3)
-            freqs.append(freq)
-            levels.append(max(p[1] for p in points))
-        return freqs, levels
-
 
 # NMR-AI 500-bin grid (configs/deuteron-acquisition.json) moved to the proton line:
 # same 1.5287 kHz bin step, 500 bins (499 steps), centered on 213 MHz.
@@ -397,16 +404,13 @@ class MainWindow(QMainWindow):
             "Demo data are synthetic. The simulated received total power equals the source setting; "
             "no coil, cable, or coupling loss is included.")
         self.measurement_mode = QComboBox()
-        self.measurement_mode.addItems(["CW / coil response", "Modulated frequency profile"])
-        self.cw_measurement = QComboBox()
-        self.cw_measurement.addItems(["Single-tone leakage check", "Coil response sweep"])
-        self.cw_measurement.setCurrentIndex(1)
+        self.measurement_mode.addItems(["Single frequency", "Multiple frequency (FM)"])
         self.generator_profile = QComboBox()
         self.generator_profile.addItems(["Generic CW (basic SCPI)", "R&S SMA (internal FM)"])
         self.visa = QLineEdit("TCPIP0::192.168.1.10::inst0::INSTR")
         self.visa.setPlaceholderText("TCPIP0::192.168.1.10::inst0::INSTR")
         self.source_freq = self._spin(0.1, 6000, 213.0, 4, " MHz")
-        self.source_power = self._spin(-120, 30, -20.0, 1, " dBm")
+        self.source_power = self._spin(-120, 30, -10.0, 1, " dBm")
         self.fm_waveform = QComboBox()
         self.fm_waveform.addItems(["SINE", "SQUARE", "PULSE", "TRIANGLE", "TRAPEZE"])
         self.fm_waveform.setCurrentText("TRIANGLE")
@@ -421,8 +425,8 @@ class MainWindow(QMainWindow):
         self.points.setRange(11, 1000)
         self.points.setValue(500)
         self.points.setToolTip(
-            "Single-tone and modulation modes use an odd point count so the carrier frequency is sampled in a bin. "
-            "Coil-response sweeps can use any count.")
+            "An odd point count places the selected single frequency at the center bin. "
+            "Multiple-frequency mode uses these points across the displayed frequency span.")
         self.n_sweeps = QSpinBox()
         self.n_sweeps.setRange(0, 1000000)
         self.n_sweeps.setValue(0)
@@ -432,9 +436,7 @@ class MainWindow(QMainWindow):
             "Target minimum time from the start of one full frequency sweep to the next. "
             "If acquisition takes longer, the actual sweep time is logged.")
         self.duration = self._spin(0, 86400, 0.0, 0, " s (0 = until Stop)")
-        self.settle = self._spin(0, 10000, 20, 0, " ms")
         self.measurement_mode.currentIndexChanged.connect(self.update_mode_controls)
-        self.cw_measurement.currentIndexChanged.connect(self.update_mode_controls)
         self.generator_profile.currentIndexChanged.connect(self.update_mode_controls)
         self.points.valueChanged.connect(self.update_mode_controls)
         self.source_freq.valueChanged.connect(self.sync_single_tone_center)
@@ -443,7 +445,7 @@ class MainWindow(QMainWindow):
         preset = QPushButton("NMR-AI grid (proton, 500 bins)")
         preset.clicked.connect(self.apply_nmr_ai_preset)
 
-        self.run_name = QLineEdit("coil_response")
+        self.run_name = QLineEdit("single_bin")
         self.out = QLineEdit(str(Path.home() / "tinySA_runs"))
         browse = QPushButton("Browse")
         browse.clicked.connect(self.browse_out)
@@ -454,7 +456,6 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         form.addRow("Data source", self.data_source)
         form.addRow("Measurement", self.measurement_mode)
-        form.addRow("CW measurement", self.cw_measurement)
         form.addRow("Generator profile", self.generator_profile)
         form.addRow("Port", port_row)
         form.addRow("Generator VISA", self.visa)
@@ -467,7 +468,6 @@ class MainWindow(QMainWindow):
         form.addRow("Span", self.span)
         form.addRow("RBW (kHz)", self.rbw)
         form.addRow("Bins / points", self.points)
-        form.addRow("Source settle", self.settle)
         form.addRow("N sweeps (0 = continuous)", self.n_sweeps)
         form.addRow("Sweep time", self.sweep_time)
         form.addRow("Duration", self.duration)
@@ -644,21 +644,16 @@ class MainWindow(QMainWindow):
 
     def update_mode_controls(self, *_):
         mode = self.measurement_mode.currentIndex()
-        stepped = mode == 0 and self.cw_measurement.currentIndex() == 1
-        fixed_carrier = not stepped
         if mode == 1 and self.generator_profile.currentIndex() != 1:
             self.generator_profile.setCurrentIndex(1)
-        if fixed_carrier:
-            self.center.setValue(self.source_freq.value())
-            if self.points.value() % 2 == 0:
-                self.points.setValue(self.points.value() + 1 if self.points.value() < 1000
-                                     else self.points.value() - 1)
-        self.center.setEnabled(not fixed_carrier)
-        self.source_freq.setEnabled(fixed_carrier)
-        self.settle.setEnabled(stepped)
+        self.center.setValue(self.source_freq.value())
+        if self.points.value() % 2 == 0:
+            self.points.setValue(self.points.value() + 1 if self.points.value() < 1000
+                                 else self.points.value() - 1)
+        self.center.setEnabled(False)
+        self.source_freq.setEnabled(True)
         modulation = mode == 1 and self.generator_profile.currentIndex() == 1
-        self.generator_profile.setEnabled(mode != 1)
-        self.cw_measurement.setEnabled(mode == 0)
+        self.generator_profile.setEnabled(mode == 0)
         self.fm_waveform.setEnabled(modulation)
         self.fm_rate.setEnabled(modulation)
         self.fm_span.setEnabled(modulation)
@@ -666,16 +661,10 @@ class MainWindow(QMainWindow):
             self.redraw_bins()
 
     def sync_single_tone_center(self, value):
-        if (self.measurement_mode.currentIndex() == 1
-                or self.cw_measurement.currentIndex() == 0):
-            self.center.setValue(value)
+        self.center.setValue(value)
 
     def apply_nmr_ai_preset(self):
-        if (self.measurement_mode.currentIndex() == 1
-                or self.cw_measurement.currentIndex() == 0):
-            self.source_freq.setValue(PROTON_CENTER_MHZ)
-        else:
-            self.center.setValue(PROTON_CENTER_MHZ)
+        self.source_freq.setValue(PROTON_CENTER_MHZ)
         self.span.setValue((NMR_AI_BINS - 1) * NMR_AI_STEP_KHZ)
         self.points.setValue(NMR_AI_BINS)
         self.rbw.setCurrentText("3")
@@ -697,10 +686,9 @@ class MainWindow(QMainWindow):
         demo = self.data_source.currentIndex() == 0
         self._run_source_freq_hz = self.source_freq.value() * 1e6
         mode = self.measurement_mode.currentIndex()
-        stepped = mode == 0 and self.cw_measurement.currentIndex() == 1
         fm_enabled = mode == 1
         if not demo and fm_enabled and self.generator_profile.currentIndex() != 1:
-            self.state.setText("Modulated frequency profile requires the R&S SMA generator profile.")
+            self.state.setText("Multiple frequency (FM) requires the R&S SMA generator profile.")
             return
         if not demo and not self.visa.text().strip():
             self.state.setText("Enter the RF generator VISA address, or select Demo data.")
@@ -711,9 +699,7 @@ class MainWindow(QMainWindow):
         center, span = self.center.value() * 1e6, self.span.value() * 1e3
         source_freq = self.source_freq.value() * 1e6
         rbw_hz = float(self.rbw.currentText()) * 1e3
-        measurement_name = ("Modulated frequency profile" if fm_enabled else
-                            "Coil response (stepped source)" if stepped else
-                            "Single-tone calibration")
+        measurement_name = "Multiple frequency (FM)" if fm_enabled else "Single frequency"
         cfg = {
             "demo": demo,
             "measurement_mode": measurement_name,
@@ -735,9 +721,8 @@ class MainWindow(QMainWindow):
             "n_sweeps": self.n_sweeps.value(),
             "sweep_time": self.sweep_time.value(),
             "duration": self.duration.value(),
-            "settle_ms": self.settle.value(),
             "outdir": self.out.text().strip() or str(Path.home() / "tinySA_runs"),
-            "run_name": self.run_name.text().strip() or "coil_response",
+            "run_name": self.run_name.text().strip() or "single_bin",
         }
         self._run_measurement_name = measurement_name
         self._single_tone_center_stats = [0, 0.0, 0.0]
@@ -747,7 +732,7 @@ class MainWindow(QMainWindow):
         self.hist_curve.setData([], [])
         self.reset_bins()
         self._rbw_hz = rbw_hz
-        self.tabs.setCurrentWidget(self.resolution_tab if not stepped else self.bin_tab)
+        self.tabs.setCurrentWidget(self.resolution_tab)
         self.thread = LoggerThread(cfg)
         self.thread.sweep.connect(self.on_sweep)
         self.thread.status.connect(self.state.setText)
@@ -760,7 +745,7 @@ class MainWindow(QMainWindow):
     def stop(self):
         if self.thread:
             self.thread.stop()
-            self.state.setText("Stopping after current sweep...")
+            self.state.setText("Turning RF off and stopping the current sweep...")
 
     def on_sweep(self, freqs, dbms, elapsed, peak_hz, peak_dbm):
         self.trace_curve.setData([f / 1e6 for f in freqs], dbms)
@@ -769,7 +754,7 @@ class MainWindow(QMainWindow):
         self.hist_curve.setData(self.t_hist, self.p_hist)
         peak_mw = 10 ** (peak_dbm / 10)
         self.readout.setText(f"Peak: {peak_dbm:.2f} dBm ({fmt_power(peak_mw)}) at {peak_hz / 1e6:.4f} MHz")
-        if self._run_measurement_name == "Single-tone calibration":
+        if self._run_measurement_name == "Single frequency":
             metrics = distribution_metrics(freqs, dbms, self._run_source_freq_hz)
             if metrics:
                 update_running_stats(self._single_tone_center_stats, metrics["center_bin_dbm"])
@@ -799,11 +784,7 @@ class MainWindow(QMainWindow):
         self.update_ur(None, None)
         # Match the measurement grid to the file so the bins line up.
         target_center = (f[0] + f[-1]) / 2
-        if (self.measurement_mode.currentIndex() == 1
-                or self.cw_measurement.currentIndex() == 0):
-            self.source_freq.setValue(target_center)
-        else:
-            self.center.setValue(target_center)
+        self.source_freq.setValue(target_center)
         self.span.setValue((f[-1] - f[0]) * 1e3)
         self.points.setValue(len(f))
         self.redraw_bins()
@@ -951,13 +932,8 @@ class MainWindow(QMainWindow):
 
     def update_resolution(self, freqs, mw):
         mode = self.measurement_mode.currentIndex()
-        single_tone = mode == 0 and self.cw_measurement.currentIndex() == 0
+        single_tone = mode == 0
         modulated = mode == 1
-        if not single_tone and not modulated:
-            self.resolution_curve.setData([], [])
-            self.resolution_info.setText(
-                "Coil-response sweeps measure power versus source frequency; bin-leakage metrics apply to a fixed tone.")
-            return
         if freqs is None or mw is None or len(freqs) < 3:
             self.resolution_curve.setData([], [])
             self.resolution_info.setText("Start an acquisition to measure the frequency-bin distribution.")
