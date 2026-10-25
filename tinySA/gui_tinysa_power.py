@@ -6,12 +6,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+from contextlib import nullcontext
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton, QSpinBox,
     QScrollArea, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -126,16 +127,21 @@ class LoggerThread(QThread):
         run_stamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
         label = re.sub(r"[^A-Za-z0-9_-]+", "_", c["run_name"].strip()).strip("_") or "single_bin"
         stem_base = f"{label}_{run_stamp}"
-        outdir = Path(c["outdir"]).expanduser()
-        outdir.mkdir(parents=True, exist_ok=True)
-        run_num = 1
-        stem = f"{stem_base}_run-{run_num:03d}"
-        while (outdir / f"{stem}_summary.csv").exists() or (outdir / f"{stem}_trace.csv").exists():
-            run_num += 1
+        summary_path = trace_path = None
+        run_id = f"{stem_base}_run-001"
+        if c["save_csv"]:
+            outdir = Path(c["outdir"]).expanduser()
+            outdir.mkdir(parents=True, exist_ok=True)
+            run_num = 1
             stem = f"{stem_base}_run-{run_num:03d}"
-        summary_path, trace_path = outdir / f"{stem}_summary.csv", outdir / f"{stem}_trace.csv"
-        run_id = stem
-        self.status.emit("Preparing run files...")
+            while (outdir / f"{stem}_summary.csv").exists() or (outdir / f"{stem}_trace.csv").exists():
+                run_num += 1
+                stem = f"{stem_base}_run-{run_num:03d}"
+            summary_path, trace_path = outdir / f"{stem}_summary.csv", outdir / f"{stem}_trace.csv"
+            run_id = stem
+            self.status.emit("Preparing CSV files...")
+        else:
+            self.status.emit("Starting without CSV saving...")
         try:
             if c["demo"]:
                 self.status.emit("Demo mode — no instruments will be opened.")
@@ -180,33 +186,35 @@ class LoggerThread(QThread):
                 if not self._stop:
                     self._write_generator(f"{output_cmd} ON")
 
-            with summary_path.open("w", newline="") as f:
-                w = csv.writer(f)
-                w.writerow(["run_id", "data_source", "measurement_mode", "sweep_id", "timestamp_utc",
-                            "elapsed_s", "n_sweeps_requested", "sweep_time_target_s", "sweep_elapsed_s",
-                            "generator_profile", "fm_enabled", "fm_waveform", "fm_rate_hz", "fm_span_hz",
-                            "source_start_hz", "source_stop_hz", "source_set_power_dbm",
-                            "center_hz", "span_hz", "points", "rbw_hz", "bin_spacing_hz",
-                            "peak_freq_hz", "peak_dbm", "peak_mw", "center_bin_dbm",
-                            "center_bin_share_pct", "adjacent_leakage_pct", "center_pm1_share_pct",
-                            "tone_to_bin_offset_hz", "width_3db_hz", "width_90_hz",
-                            "sigma_center_bin_db", "sigma_adjacent_leakage_pct_points"])
-            trace_f = trace_path.open("w", newline="")
-            trace_w = csv.writer(trace_f)
-            trace_w.writerow(["run_id", "data_source", "measurement_mode", "sweep_id", "timestamp_utc",
-                              "sweep_elapsed_s", "bin_index", "freq_hz", "dbm", "mw", "rbw_hz",
-                              "bin_spacing_hz", "source_freq_hz",
-                              "source_set_power_dbm", "generator_profile", "fm_enabled", "fm_waveform",
-                              "fm_rate_hz", "fm_span_hz"])
+            if summary_path is not None:
+                with summary_path.open("w", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(["run_id", "data_source", "measurement_mode", "sweep_id", "timestamp_utc",
+                                "elapsed_s", "n_sweeps_requested", "update_interval_target_s", "sweep_elapsed_s",
+                                "generator_profile", "fm_enabled", "fm_waveform", "fm_rate_hz", "fm_span_hz",
+                                "source_start_hz", "source_stop_hz", "source_set_power_dbm",
+                                "center_hz", "span_hz", "points", "rbw_hz", "bin_spacing_hz",
+                                "peak_freq_hz", "peak_dbm", "peak_mw", "center_bin_dbm",
+                                "center_bin_share_pct", "adjacent_leakage_pct", "center_pm1_share_pct",
+                                "tone_to_bin_offset_hz", "width_3db_hz", "width_90_hz",
+                                "sigma_center_bin_db", "sigma_adjacent_leakage_pct_points"])
+                trace_f = trace_path.open("w", newline="")
+                trace_w = csv.writer(trace_f)
+                trace_w.writerow(["run_id", "data_source", "measurement_mode", "sweep_id", "timestamp_utc",
+                                  "sweep_elapsed_s", "bin_index", "freq_hz", "dbm", "mw", "rbw_hz",
+                                  "bin_spacing_hz", "source_freq_hz",
+                                  "source_set_power_dbm", "generator_profile", "fm_enabled", "fm_waveform",
+                                  "fm_rate_hz", "fm_span_hz"])
 
             start_time = time.monotonic()
             n = 0
             bad = 0
             center_bin_stats = [0, 0.0, 0.0]
             adjacent_leakage_stats = [0, 0.0, 0.0]
-            self.status.emit(f"Run {run_id} — logging")
-            with summary_path.open("a", newline="") as f:
-                w = csv.writer(f)
+            self.status.emit(f"Run {run_id} — logging" if c["save_csv"] else "Running — CSV saving off")
+            summary_context = summary_path.open("a", newline="") if summary_path is not None else nullcontext(None)
+            with summary_context as f:
+                w = csv.writer(f) if f is not None else None
                 while not self._stop:
                     loop_start = time.monotonic()
                     try:
@@ -249,8 +257,9 @@ class LoggerThread(QThread):
                     elapsed = time.monotonic() - start_time
                     source_start = source_stop = c["source_freq_hz"]
                     data_source = "toy" if c["demo"] else "hardware"
-                    w.writerow([run_id, data_source, c["measurement_mode"], n, now, f"{elapsed:.3f}",
-                                c["n_sweeps"], f"{c['sweep_time']:.3f}", f"{sweep_elapsed:.3f}",
+                    if w is not None:
+                        w.writerow([run_id, data_source, c["measurement_mode"], n, now, f"{elapsed:.3f}",
+                                c["n_sweeps"], f"{c['update_interval_s']:.3f}", f"{sweep_elapsed:.3f}",
                                 c["generator_profile"], c["fm_enabled"], c["fm_waveform"],
                                 f"{c['fm_rate_hz']:.6g}", f"{c['fm_span_hz']:.3f}",
                                 f"{source_start:.1f}", f"{source_stop:.1f}", f"{c['source_power_dbm']:.3f}",
@@ -266,8 +275,9 @@ class LoggerThread(QThread):
                                 f"{analysis_metrics.get('width_3db_hz', '')}",
                                 f"{analysis_metrics.get('width_90_hz', '')}",
                                 sigma_center_db, sigma_adjacent_pct_points])
-                    f.flush()
-                    trace_w.writerows([run_id, data_source, c["measurement_mode"], n, now,
+                        f.flush()
+                    if trace_f is not None:
+                        trace_w.writerows([run_id, data_source, c["measurement_mode"], n, now,
                                        f"{sweep_elapsed:.3f}", j,
                                        f"{fr:.1f}", f"{d:.3f}", f"{10 ** (d / 10):.9g}",
                                        f"{c['rbw_hz']:.1f}",
@@ -276,18 +286,18 @@ class LoggerThread(QThread):
                                        f"{c['source_power_dbm']:.3f}", c["generator_profile"],
                                        c["fm_enabled"], c["fm_waveform"], f"{c['fm_rate_hz']:.6g}",
                                        f"{c['fm_span_hz']:.3f}"]
-                                      for j, (fr, d) in enumerate(zip(freqs, dbms)))
-                    trace_f.flush()
+                                          for j, (fr, d) in enumerate(zip(freqs, dbms)))
+                        trace_f.flush()
                     n += 1
                     requested = c["n_sweeps"]
-                    self.status.emit(f"Run {run_id} — sweep {n}"
-                                     + (f" / {requested}" if requested else ""))
+                    sweep_label = f"Run {run_id} — sweep {n}" if c["save_csv"] else f"Sweep {n}"
+                    self.status.emit(sweep_label + (f" / {requested}" if requested else ""))
                     self.sweep.emit(freqs, dbms, elapsed, peak_hz, peak_dbm)
                     if requested and n >= requested:
                         break
                     if c["duration"] and elapsed >= c["duration"]:
                         break
-                    remaining = c["sweep_time"] - (time.monotonic() - loop_start)
+                    remaining = c["update_interval_s"] - (time.monotonic() - loop_start)
                     while remaining > 0 and not self._stop:
                         pause_ms = min(100, max(1, int(remaining * 1000)))
                         self.msleep(pause_ms)
@@ -326,7 +336,10 @@ class LoggerThread(QThread):
                 rm.close()
             if not self._failed:
                 result = "Stopped" if self._stop else f"Completed {n} sweeps"
-                self.status.emit(f"{result}. Saved {summary_path.name} and {trace_path.name}")
+                if c["save_csv"]:
+                    self.status.emit(f"{result}. Saved {summary_path.name} and {trace_path.name}")
+                else:
+                    self.status.emit(f"{result}. CSV saving was off.")
 
     @staticmethod
     def _toy_sweep(c):
@@ -431,10 +444,12 @@ class MainWindow(QMainWindow):
         self.n_sweeps.setRange(0, 1000000)
         self.n_sweeps.setValue(0)
         self.n_sweeps.setToolTip("0 runs continuously until Stop or the total duration is reached.")
-        self.sweep_time = self._spin(0, 3600, 60.0, 1, " s")
-        self.sweep_time.setToolTip(
-            "Target minimum time from the start of one full frequency sweep to the next. "
-            "If acquisition takes longer, the actual sweep time is logged.")
+        self.update_interval = self._spin(0, 3600, 1.0, 1, " s")
+        self.update_interval.setToolTip(
+            "Minimum time between completed tinySA sweeps. Set to 0 for the fastest possible updates; "
+            "the instrument's scan time still sets the actual rate.")
+        self.save_csv = QCheckBox("Save summary and bin-trace CSV files")
+        self.save_csv.setChecked(True)
         self.duration = self._spin(0, 86400, 0.0, 0, " s (0 = until Stop)")
         self.measurement_mode.currentIndexChanged.connect(self.update_mode_controls)
         self.generator_profile.currentIndexChanged.connect(self.update_mode_controls)
@@ -469,7 +484,8 @@ class MainWindow(QMainWindow):
         form.addRow("RBW (kHz)", self.rbw)
         form.addRow("Bins / points", self.points)
         form.addRow("N sweeps (0 = continuous)", self.n_sweeps)
-        form.addRow("Sweep time", self.sweep_time)
+        form.addRow("Update interval", self.update_interval)
+        form.addRow("Save data", self.save_csv)
         form.addRow("Duration", self.duration)
         form.addRow(preset)
         form.addRow("Run name", self.run_name)
@@ -719,8 +735,9 @@ class MainWindow(QMainWindow):
             "rbw_hz": rbw_hz,
             "points": self.points.value(),
             "n_sweeps": self.n_sweeps.value(),
-            "sweep_time": self.sweep_time.value(),
+            "update_interval_s": self.update_interval.value(),
             "duration": self.duration.value(),
+            "save_csv": self.save_csv.isChecked(),
             "outdir": self.out.text().strip() or str(Path.home() / "tinySA_runs"),
             "run_name": self.run_name.text().strip() or "single_bin",
         }
