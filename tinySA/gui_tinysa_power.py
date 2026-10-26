@@ -151,7 +151,8 @@ class LoggerThread(QThread):
                 if c["fm_enabled"] and not is_sma:
                     raise RuntimeError("FM requires the R&S SMA (internal FM) generator profile.")
                 self.status.emit("Connecting to RF generator and tinySA...")
-                rm = pyvisa.ResourceManager()
+                # Use the same VISA backend as the known-working standalone FM script.
+                rm = pyvisa.ResourceManager("@py")
                 generator = rm.open_resource(c["visa_address"], timeout=5000)
                 freq_cmd = "SOURce1:FREQuency:CW" if is_sma else "SOURce:FREQuency:CW"
                 power_cmd = ("SOURce1:POWer:LEVel:IMMediate:AMPLitude" if is_sma
