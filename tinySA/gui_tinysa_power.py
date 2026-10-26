@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import csv
+import random
 import sys
 import threading
 import time
@@ -82,6 +83,19 @@ def running_sample_std(state):
     return float(np.sqrt(state[2] / (state[0] - 1))) if state[0] > 1 else None
 
 
+STEP_SETTLE_S = 0.015  # generator settling time after each frequency step, as in fm.py
+POWER_PROFILES = ("Fixed (source power)", "Linear ramp", "Random")
+
+
+def step_power(index, count, profile, fixed_dbm, low_dbm, high_dbm):
+    """Power assigned to bin `index` of `count` for the stepped-frequency mode."""
+    if profile == POWER_PROFILES[1]:
+        return low_dbm + (index / max(count - 1, 1)) * (high_dbm - low_dbm)
+    if profile == POWER_PROFILES[2]:
+        return random.uniform(min(low_dbm, high_dbm), max(low_dbm, high_dbm))
+    return fixed_dbm
+
+
 class LoggerThread(QThread):
     sweep = pyqtSignal(list, list, float, float, float)  # freqs_hz, dbms, elapsed_s, peak_hz, peak_dbm
     status = pyqtSignal(str)
@@ -148,8 +162,6 @@ class LoggerThread(QThread):
             else:
                 import pyvisa
                 is_sma = c["generator_profile"] == "R&S SMA (internal FM)"
-                if c["fm_enabled"] and not is_sma:
-                    raise RuntimeError("FM requires the R&S SMA (internal FM) generator profile.")
                 self.status.emit("Connecting to RF generator and tinySA...")
                 # Use the same VISA backend as the known-working standalone FM script.
                 rm = pyvisa.ResourceManager("@py")
@@ -160,8 +172,9 @@ class LoggerThread(QThread):
                 output_cmd = "OUTPut1:STATe" if is_sma else "OUTPut:STATe"
                 self._generator = generator
                 self._output_cmd = output_cmd
+                self._freq_cmd, self._power_cmd = freq_cmd, power_cmd
                 if c["fm_enabled"]:
-                    # Match the known-working standalone SMA setup in fm_modulation.py.
+                    # Same start-up as the standalone stepped-frequency script fm.py.
                     self._write_generator("*RST")
                     self._write_generator("*CLS")
                 self._write_generator(f"{output_cmd} OFF")
@@ -170,42 +183,21 @@ class LoggerThread(QThread):
                 c["source_freq_hz"] = float(self._query_generator(f"{freq_cmd}?"))
                 c["source_power_dbm"] = float(self._query_generator(f"{power_cmd}?"))
                 if is_sma:
-                    if c["fm_enabled"]:
-                        waveform_scpi = {
-                            "SINE": "SINE", "SQUARE": "SQUare", "PULSE": "PULSe",
-                            "TRIANGLE": "TRIangle", "TRAPEZE": "TRAPeze",
-                        }[c["fm_waveform"]]
-                        self._write_generator(f"SOURce1:LFOutput1:SHAPe {waveform_scpi}")
-                        self._write_generator(f"SOURce1:LFOutput1:FREQuency {c['fm_rate_hz']:.6g}")
-                        self._write_generator("SOURce1:FM1:SOURce LF1")
-                        self._write_generator(f"SOURce1:FM1:DEViation {c['fm_span_hz'] / 2:.6g}")
-                        self._write_generator("SOURce1:FM:MODe HBANdwidth")
-                        self._write_generator("SOURce1:FM1:STATe 1")
-                        self._write_generator("SOURce1:LFOutput1:STATe 1")
-                    else:
-                        self._write_generator("SOURce1:FM1:STATe 0")
-                        self._write_generator("SOURce1:LFOutput1:STATe 0")
+                    # Frequency is stepped with CW, so internal FM must stay off.
+                    self._write_generator("SOURce1:FM1:STATe 0")
+                    self._write_generator("SOURce1:LFOutput1:STATe 0")
                 ser = open_tinysa(c["port"] or None)
                 command_fn(ser, "pause")
                 command_fn(ser, f"rbw {c['rbw_hz'] / 1e3:g}")
                 if not self._stop:
                     self._write_generator(f"{output_cmd} ON")
-                    if c["fm_enabled"]:
-                        fm_state = self._query_generator("SOURce1:FM1:STATe?").strip().upper()
-                        lf_state = self._query_generator("SOURce1:LFOutput1:STATe?").strip().upper()
-                        rf_state = self._query_generator("OUTPut1:STATe?").strip().upper()
-                        is_on = lambda state: state in ("1", "ON")
-                        if not (is_on(fm_state) and is_on(lf_state) and is_on(rf_state)):
-                            raise RuntimeError(
-                                "Generator did not confirm FM, LF output, and RF output are ON "
-                                f"(FM={fm_state}, LF={lf_state}, RF={rf_state}).")
 
             if summary_path is not None:
                 with summary_path.open("w", newline="") as f:
                     w = csv.writer(f)
                     w.writerow(["run_id", "data_source", "measurement_mode", "sweep_id", "timestamp_utc",
                                 "elapsed_s", "n_sweeps_requested", "update_interval_target_s", "sweep_elapsed_s",
-                                "generator_profile", "fm_enabled", "fm_waveform", "fm_rate_hz", "fm_span_hz",
+                                "generator_profile", "fm_enabled", "power_profile", "power_low_dbm", "power_high_dbm",
                                 "source_start_hz", "source_stop_hz", "source_set_power_dbm",
                                 "center_hz", "span_hz", "points", "rbw_hz", "bin_spacing_hz",
                                 "peak_freq_hz", "peak_dbm", "peak_mw", "center_bin_dbm",
@@ -217,8 +209,8 @@ class LoggerThread(QThread):
                 trace_w.writerow(["run_id", "data_source", "measurement_mode", "sweep_id", "timestamp_utc",
                                   "sweep_elapsed_s", "bin_index", "freq_hz", "dbm", "mw", "rbw_hz",
                                   "bin_spacing_hz", "source_freq_hz",
-                                  "source_set_power_dbm", "generator_profile", "fm_enabled", "fm_waveform",
-                                  "fm_rate_hz", "fm_span_hz"])
+                                  "source_set_power_dbm", "generator_profile", "fm_enabled", "power_profile",
+                                  "power_low_dbm", "power_high_dbm"])
 
             start_time = time.monotonic()
             n = 0
@@ -232,7 +224,10 @@ class LoggerThread(QThread):
                 while not self._stop:
                     loop_start = time.monotonic()
                     try:
-                        if c["demo"]:
+                        set_f = set_p = None
+                        if c["fm_enabled"]:
+                            freqs, dbms, set_f, set_p = self._stepped_sweep(c, ser)
+                        elif c["demo"]:
                             freqs, dbms = self._toy_sweep(c)
                         else:
                             pts = acquire(ser, c["start_hz"], c["stop_hz"], c["points"])
@@ -274,8 +269,8 @@ class LoggerThread(QThread):
                     if w is not None:
                         w.writerow([run_id, data_source, c["measurement_mode"], n, now, f"{elapsed:.3f}",
                                 c["n_sweeps"], f"{c['update_interval_s']:.3f}", f"{sweep_elapsed:.3f}",
-                                c["generator_profile"], c["fm_enabled"], c["fm_waveform"],
-                                f"{c['fm_rate_hz']:.6g}", f"{c['fm_span_hz']:.3f}",
+                                c["generator_profile"], c["fm_enabled"], c["power_profile"],
+                                f"{c['power_low_dbm']:.3f}", f"{c['power_high_dbm']:.3f}",
                                 f"{source_start:.1f}", f"{source_stop:.1f}", f"{c['source_power_dbm']:.3f}",
                                 f"{c['center_hz']:.1f}", f"{c['span_hz']:.1f}", c["points"],
                                 f"{c['rbw_hz']:.1f}",
@@ -296,10 +291,10 @@ class LoggerThread(QThread):
                                        f"{fr:.1f}", f"{d:.3f}", f"{10 ** (d / 10):.9g}",
                                        f"{c['rbw_hz']:.1f}",
                                        f"{analysis_metrics.get('bin_spacing_hz', '')}",
-                                       f"{c['source_freq_hz']:.1f}",
-                                       f"{c['source_power_dbm']:.3f}", c["generator_profile"],
-                                       c["fm_enabled"], c["fm_waveform"], f"{c['fm_rate_hz']:.6g}",
-                                       f"{c['fm_span_hz']:.3f}"]
+                                       f"{set_f[j] if set_f else c['source_freq_hz']:.1f}",
+                                       f"{set_p[j] if set_p else c['source_power_dbm']:.3f}",
+                                       c["generator_profile"], c["fm_enabled"], c["power_profile"],
+                                       f"{c['power_low_dbm']:.3f}", f"{c['power_high_dbm']:.3f}"]
                                           for j, (fr, d) in enumerate(zip(freqs, dbms)))
                         trace_f.flush()
                     n += 1
@@ -355,45 +350,46 @@ class LoggerThread(QThread):
                 else:
                     self.status.emit(f"{result}. CSV saving was off.")
 
+    def _stepped_sweep(self, c, ser):
+        """Step the generator over the bin grid (as fm.py does) and read the tinySA at each bin.
+
+        Returns (freqs, dbms, set_freqs, set_powers); empty lists if stopped part-way.
+        """
+        n = c["points"]
+        grid = np.linspace(c["start_hz"], c["stop_hz"], n)
+        half = max((c["stop_hz"] - c["start_hz"]) / max(n - 1, 1) / 2, 500.0)
+        freqs, dbms, set_p = [], [], []
+        for i, f in enumerate(grid):
+            if self._stop:
+                return [], [], [], []
+            p = step_power(i, n, c["power_profile"], c["source_power_dbm"],
+                           c["power_low_dbm"], c["power_high_dbm"])
+            if c["demo"]:
+                freqs.append(float(f))
+                dbms.append(p + random.gauss(0.0, 0.1))
+            else:
+                self._write_generator(f"{self._freq_cmd} {f:.1f}")
+                self._write_generator(f"{self._power_cmd} {p:.2f}")
+                time.sleep(STEP_SETTLE_S)
+                # 3-point scan centred on the bin; the middle point is the bin itself.
+                mid = acquire(ser, f - half, f + half, 3)[1]
+                freqs.append(mid[0])
+                dbms.append(mid[1])
+            set_p.append(p)
+            if i % 10 == 0:
+                self.status.emit(f"Stepping bin {i + 1}/{n} ({f / 1e6:.4f} MHz, {p:.2f} dBm)")
+        return freqs, dbms, [float(f) for f in grid], set_p
+
     @staticmethod
     def _toy_sweep(c):
         n = c["points"]
         center, span = c["center_hz"], c["span_hz"]
-        width = max(c["rbw_hz"] * 5.0, span / 24.0)
-        # Keep the demo's integrated receive power equal to the configured source power.
-        # The normalized FM weights divide that total across the displayed bins.
         peak = c["source_power_dbm"]
         freqs, dbms = [], []
-        fm_weights = None
-        if c["fm_enabled"] and c["measurement_mode"] == "Multiple frequency (FM)":
-            deviation = c["fm_span_hz"] / 2
-            x = (np.linspace(center - span / 2, center + span / 2, n) - c["source_freq_hz"]) / max(deviation, 1.0)
-            inside = np.abs(x) <= 1.0
-            fm_weights = np.zeros(n, dtype=float)
-            if c["fm_waveform"] == "TRIANGLE":
-                fm_weights[inside] = 1.0
-            elif c["fm_waveform"] == "SINE":
-                fm_weights[inside] = 1.0 / np.sqrt(np.maximum(1.0 - x[inside] ** 2, 0.002))
-            elif c["fm_waveform"] == "SQUARE":
-                width = max(c["rbw_hz"] / max(deviation, 1.0), 0.005)
-                fm_weights = np.exp(-0.5 * ((np.abs(x) - 1.0) / width) ** 2)
-            elif c["fm_waveform"] == "PULSE":
-                fm_weights[inside] = 0.35 + 0.65 * np.cos(np.pi * x[inside]) ** 2
-            else:  # trapezoid: flat center with rounded, higher-density edges
-                fm_weights[inside] = 1.0 + 0.35 * np.abs(x[inside]) ** 4
-            if fm_weights.sum() > 0:
-                # Each analyzer point reports power integrated over one RBW. Since
-                # neighboring points overlap, scale so sum(power) * step / RBW
-                # recovers the configured source power rather than under-counting it.
-                bin_step_hz = span / max(n - 1, 1)
-                fm_weights *= (c["rbw_hz"] / max(bin_step_hz, 1.0)) / fm_weights.sum()
         for i in range(n):
             freq = center - span / 2 + span * i / (n - 1)
-            if fm_weights is not None:
-                level = 10.0 * np.log10(max(10 ** (peak / 10) * fm_weights[i], 1e-30))
-            else:
-                x = (freq - c["source_freq_hz"]) / max(c["rbw_hz"] / 2, 1)
-                level = peak - 10.0 * np.log10(1.0 + x ** 4)
+            x = (freq - c["source_freq_hz"]) / max(c["rbw_hz"] / 2, 1)
+            level = peak - 10.0 * np.log10(1.0 + x ** 4)
             freqs.append(freq)
             dbms.append(float(max(-120, level)))
         return freqs, dbms
@@ -438,11 +434,13 @@ class MainWindow(QMainWindow):
         self.visa.setPlaceholderText("TCPIP0::192.168.1.10::inst0::INSTR")
         self.source_freq = self._spin(0.1, 6000, 213.0, 4, " MHz")
         self.source_power = self._spin(-120, 30, -10.0, 1, " dBm")
-        self.fm_waveform = QComboBox()
-        self.fm_waveform.addItems(["SINE", "SQUARE", "PULSE", "TRIANGLE", "TRAPEZE"])
-        self.fm_waveform.setCurrentText("TRIANGLE")
-        self.fm_rate = self._spin(0.001, 100000, 1.0, 3, " Hz")
-        self.fm_span = self._spin(0.001, 1000000, 400.0, 3, " kHz")
+        self.power_profile = QComboBox()
+        self.power_profile.addItems(POWER_PROFILES)
+        self.power_profile.setToolTip(
+            "Multiple-frequency mode steps the generator across every bin (like fm.py) and "
+            "assigns each bin a power: the fixed source power, a ramp, or random values.")
+        self.power_low = self._spin(-120, 30, -20.0, 1, " dBm")
+        self.power_high = self._spin(-120, 30, 0.0, 1, " dBm")
         self.center = self._spin(0.1, 6000, 213.0, 4, " MHz")
         self.span = self._spin(1, 6e6, 400.0, 1, " kHz")
         self.rbw = QComboBox()
@@ -490,9 +488,9 @@ class MainWindow(QMainWindow):
         form.addRow("Generator VISA", self.visa)
         form.addRow("Source frequency", self.source_freq)
         form.addRow("Source power", self.source_power)
-        form.addRow("FM waveform", self.fm_waveform)
-        form.addRow("FM rate", self.fm_rate)
-        form.addRow("FM span", self.fm_span)
+        form.addRow("Power profile", self.power_profile)
+        form.addRow("Power low (ramp start / random min)", self.power_low)
+        form.addRow("Power high (ramp end / random max)", self.power_high)
         form.addRow("Center", self.center)
         form.addRow("Span", self.span)
         form.addRow("RBW (kHz)", self.rbw)
@@ -674,19 +672,16 @@ class MainWindow(QMainWindow):
 
     def update_mode_controls(self, *_):
         mode = self.measurement_mode.currentIndex()
-        if mode == 1 and self.generator_profile.currentIndex() != 1:
-            self.generator_profile.setCurrentIndex(1)
         self.center.setValue(self.source_freq.value())
         if self.points.value() % 2 == 0:
             self.points.setValue(self.points.value() + 1 if self.points.value() < 1000
                                  else self.points.value() - 1)
         self.center.setEnabled(False)
         self.source_freq.setEnabled(True)
-        modulation = mode == 1 and self.generator_profile.currentIndex() == 1
-        self.generator_profile.setEnabled(mode == 0)
-        self.fm_waveform.setEnabled(modulation)
-        self.fm_rate.setEnabled(modulation)
-        self.fm_span.setEnabled(modulation)
+        stepped = mode == 1
+        self.power_profile.setEnabled(stepped)
+        self.power_low.setEnabled(stepped)
+        self.power_high.setEnabled(stepped)
         if hasattr(self, "resolution_curve"):
             self.redraw_bins()
 
@@ -717,9 +712,6 @@ class MainWindow(QMainWindow):
         self._run_source_freq_hz = self.source_freq.value() * 1e6
         mode = self.measurement_mode.currentIndex()
         fm_enabled = mode == 1
-        if not demo and fm_enabled and self.generator_profile.currentIndex() != 1:
-            self.state.setText("Multiple frequency (FM) requires the R&S SMA generator profile.")
-            return
         if not demo and not self.visa.text().strip():
             self.state.setText("Enter the RF generator VISA address, or select Demo data.")
             return
@@ -735,9 +727,9 @@ class MainWindow(QMainWindow):
             "measurement_mode": measurement_name,
             "generator_profile": self.generator_profile.currentText(),
             "fm_enabled": fm_enabled,
-            "fm_waveform": self.fm_waveform.currentText(),
-            "fm_rate_hz": self.fm_rate.value(),
-            "fm_span_hz": self.fm_span.value() * 1e3,
+            "power_profile": self.power_profile.currentText(),
+            "power_low_dbm": self.power_low.value(),
+            "power_high_dbm": self.power_high.value(),
             "port": port,
             "visa_address": self.visa.text().strip(),
             "source_freq_hz": source_freq,
@@ -922,7 +914,9 @@ class MainWindow(QMainWindow):
         # Each bin is a power in one RBW, and bins overlap when the step is smaller than the RBW.
         # Integrating needs sum * (step / RBW); the plain sum would over-count by RBW/step.
         step_hz = float(np.mean(np.diff(self.bin_freqs)))
-        total_mw = float(mw.sum()) * step_hz / self._rbw_hz
+        total_mw = float(mw.sum())
+        if self._run_measurement_name != "Multiple frequency (FM)":
+            total_mw *= step_hz / self._rbw_hz  # single tone: overlapping bins
         units = self.bin_units.currentIndex()
         auto_factor, auto_label = power_unit(float(mw.max()))
         if units == 0:
@@ -956,7 +950,7 @@ class MainWindow(QMainWindow):
         extra = f" In target bins: {100 * inside:.1f}% of power." if inside is not None else ""
         self.bin_info.setText(
             f"{len(x)} bins, {step_khz:.4f} kHz apart ({label}). "
-            f"Total power (approx., sum x step/RBW): {fmt_power(total_mw)} "
+            f"Total power (approx.): {fmt_power(total_mw)} "
             f"({10 * np.log10(max(total_mw, 1e-30)):.2f} dBm)." + extra
         )
         self.update_resolution(self.bin_freqs, mw)
@@ -1007,12 +1001,12 @@ class MainWindow(QMainWindow):
             )
         else:
             factor, unit = power_unit(float(signal_mw.max()))
-            self.resolution_plot.setTitle("Modulated frequency power distribution")
+            self.resolution_plot.setTitle("Stepped-frequency power distribution")
             self.resolution_plot.setLabel("left", f"Power per bin ({unit})")
             self.resolution_curve.setData(offsets_khz, signal_mw * factor)
             peak_offset_khz = float(offsets_khz[int(np.argmax(signal_mw))])
             self.resolution_info.setText(
-                f"{self.fm_waveform.currentText()} FM · RBW {self._rbw_hz / 1e3:g} kHz · "
+                f"{self.power_profile.currentText()} · RBW {self._rbw_hz / 1e3:g} kHz · "
                 f"bin spacing {spacing_khz:.4g} kHz · peak offset {peak_offset_khz:.4g} kHz · "
                 f"3 dB width {metrics['width_3db_hz'] / 1e3:.4g} kHz · "
                 f"90% measured-power width {metrics['width_90_hz'] / 1e3:.4g} kHz. "
