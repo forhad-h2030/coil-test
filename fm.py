@@ -5,8 +5,6 @@ import pyvisa
 from pyvisa_py.serial import SerialSession
 from pyvisa_py.usb import USBInstrSession, USBRawSession
 
-# from libreVNA import libreVNA
-
 rm = pyvisa.ResourceManager()
 
 print("USB INSTR:", USBInstrSession.list_resources())
@@ -42,24 +40,27 @@ sma.write("OUTPut:STATe ON")
 
 results = []
 print("\nStarting synchronized sweep...")
+sweep_start = time.perf_counter()
 
 for idx, freq in enumerate(frequencies):
-    sma.write(f"SOURce:FREQuency:CW {freq}")
-    time.sleep(SETTLING_TIME)
     random_power = random.uniform(MIN_POWER, MAX_POWER)
-    sma.write(f"SOURce:POWer:LEVel {random_power:.2f}")
+    # One write for both settings, then wait for the generator to settle.
+    sma.write(f"SOURce:FREQuency:CW {freq:.1f};:SOURce:POWer:LEVel {random_power:.2f}")
+    time.sleep(SETTLING_TIME)
 
     #raw_data = vna.query(f":VNA:TRACE:DATA? S11")
-    current_pow = float(sma.query("SOURce:POWer:LEVel?"))
-    random_power = random.uniform(MIN_POWER, MAX_POWER)
     results.append({
         'frequency': freq,
-        'power_dbm': current_pow
+        'power_dbm': random_power
     #    'data': raw_data
     })
     if idx % 10 == 0 or idx == NUM_POINTS - 1:
         #print(f"Progress: Point {idx+1}/{NUM_POINTS} ({freq/1e6:.2f} MHz)")
-        print(f"Freq: {freq/1e6:8.2f} MHz | Power: {current_pow:6.2f} dBm | Point {idx+1}/{NUM_POINTS}")
+        print(f"Freq: {freq/1e6:8.2f} MHz | Power: {random_power:6.2f} dBm | Point {idx+1}/{NUM_POINTS}")
+
+sweep_time = time.perf_counter() - sweep_start
+print(f"Sweep time: {sweep_time:.3f} s for {NUM_POINTS} points ({sweep_time / NUM_POINTS * 1e3:.2f} ms per point)")
+print(f"Generator error queue: {sma.query('SYSTem:ERRor?').strip()}")
 
 sma.write("OUTPut:STATe OFF")
 sma.close()
