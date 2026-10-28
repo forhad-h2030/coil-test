@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Standalone tinySA recorder: sweep over and over, one timestamped row per sweep in events.csv.
-Config fields come first, then one dBm column per bin (header = bin frequency, MHz).
-    python record_tinysa_events.py              # back to back until Ctrl+C
+Config fields come first, then one dBm column per bin (bin_0 ... bin_N-1).
+    python record_tinysa_events.py              
     python record_tinysa_events.py --interval 1 # one sweep every second
 """
 import argparse
@@ -25,7 +25,7 @@ def record_event(sa, event_id, center_hz, span_hz, bins, rbw_hz, out):
     t_sweep = datetime.now()
     rows = sa.read(center_hz, span_hz, bins, rbw_hz)
     t_end = datetime.now()
-    header = CONFIG + [f"{fr / 1e6:.6f}" for _, fr, _, _ in rows]
+    header = CONFIG + [f"bin_{i}" for i, _, _, _ in rows]
     row = [event_id, t_sweep.isoformat(), t_end.isoformat(), f"{center_hz / 1e6:.6f}",
            span_hz, bins, rbw_hz / 1e3] + [f"{d:.3f}" for _, _, d, _ in rows]
     if os.path.exists(out):
