@@ -75,6 +75,7 @@ def apply_profile(sma, profile):
     send(sma, "*CLS")
     send(sma, "OUTPut:STATe OFF")
     send(sma, "SOURce:FREQuency:MODE CW")
+    send(sma, "SOURce:POWer:MODE CW")
     send(sma, f'SOURce:LIST:SELect "{LIST_NAME}"')
     send(sma, "SOURce:LIST:FREQuency " + ",".join(f"{v:.0f}" for v in profile["freq"]))
     send(sma, "SOURce:LIST:POWer " + ",".join(f"{v}" for v in profile["pow"]))
@@ -87,6 +88,7 @@ def apply_profile(sma, profile):
             raise RuntimeError(f"generator holds the wrong number of {q} points")
     send(sma, "SOURce:LIST:MODE AUTO")
     send(sma, "SOURce:LIST:TRIGger:SOURce SINGle")  # one pass per trigger, no repeat
+    send(sma, "SOURce:POWer:MODE LIST")  # the power list needs its own mode, or FREQuency:MODE LIST conflicts
     send(sma, "SOURce:FREQuency:MODE LIST")
     send(sma, "OUTPut:STATe ON")
     send(sma, "SOURce:LIST:TRIGger:EXECute")
