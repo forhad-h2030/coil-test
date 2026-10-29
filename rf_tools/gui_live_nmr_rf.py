@@ -72,14 +72,25 @@ def find_baseline():
 
 def read_baseline_file(path):
     """Amplitudes of a single no-RF event file: four header lines, then one value per line."""
+    values = []
     with open(path) as f:
-        return np.array([float(x) for x in f if x.strip()][4:])
+        for n, line in enumerate(f, 1):
+            if line.strip():
+                try:
+                    values.append(float(line))
+                except ValueError:
+                    raise ValueError(f"{Path(path).name}, line {n}: '{line.strip()[:30]}' is not a number "
+                                     "(a baseline file has 4 header lines, then one value per line)") from None
+    if len(values) <= 4:
+        raise ValueError(f"{Path(path).name} holds only {len(values)} numbers: no baseline values after the header")
+    return np.array(values[4:])
 
 
 class NmrThread(QThread):
     """Follows a run file that is still being written and reports each new event."""
     got_event = pyqtSignal(object)  # freq, amp, base, base_name, ident (row1, row2), file
     note = pyqtSignal(str)
+    warn = pyqtSignal(str)  # something is wrong but the thread keeps trying
     failed = pyqtSignal(str)
 
     def __init__(self, event_text, base_file, base_event, poll_s):
@@ -94,23 +105,28 @@ class NmrThread(QThread):
             got = ready()
             if got is not None:
                 return got
-            self.note.emit(f"waiting for {what} ..." + (f"   ({self.hint})" if self.hint else ""))
+            (self.warn if self.hint else self.note).emit(
+                f"waiting for {what} ..." + (f"   ({self.hint})" if self.hint else ""))
             self.stop_flag.wait(max(self.poll_s, 1.0))
         return None
 
     def run(self):
         try:
+            text = self.event_text.strip()
+            self.hint = (f"nothing found for '{text}'" if text else "no QCV*.csv found") + f" under {data_root()}"
             path = self._wait_for("the run file", lambda: find_run(self.event_text))
             if path is None:
                 return
             self.note.emit(f"run file: {path.name}")
+            self.hint = ""
             if self.base_file:
                 base, base_name = read_baseline_file(self.base_file), Path(self.base_file).name
             else:
                 def event_amp():
                     try:
                         events = read_events(path)[0] if path.stat().st_size else []
-                    except (OSError, ValueError):  # file busy or mid-write
+                    except (OSError, ValueError) as e:  # file busy, mid-write, or not a run file
+                        self.hint = f"cannot read {path.name} yet: {e}"
                         return None
                     self.hint = "" if events or not path.stat().st_size else \
                         f"{path.name} holds no NMR events: is it a run file like QCV....csv?"
@@ -124,10 +140,10 @@ class NmrThread(QThread):
                 try:
                     ev = read_latest(path)
                 except (OSError, ValueError) as e:  # file busy or mid-write: try again next time
-                    self.note.emit(f"read failed, retrying: {e}")
+                    self.warn.emit(f"read failed, retrying: {e}")
                     ev = None
                 if ev is None and last_id is None:
-                    self.note.emit(f"{path.name}: no complete NMR event yet (needs two events; "
+                    self.warn.emit(f"{path.name}: no complete NMR event yet (needs two events; "
                                    "is it a run file like QCV....csv?)")
                 if ev is not None:
                     if len(ev["amp"]) != len(base):
@@ -254,23 +270,28 @@ class NmrPanel(QWidget):
     def start(self):
         base_file = self.base_edit.text().strip() or None
         if base_file and not Path(base_file).is_file():
-            self.status.setText(f"baseline file not found: {base_file}")
+            self.show_status(f"FAILED: baseline file not found: {base_file}", error=True)
             return
         self.shown = 0
         for c in (self.base_curve, self.event_curve, self.diff_curve):
             c.setData([], [])
         self.worker = NmrThread(self.event_edit.text(), base_file, self.base_event.value(), self.poll.value())
         self.worker.got_event.connect(self.on_event)
-        self.worker.note.connect(self.status.setText)
-        self.worker.failed.connect(lambda msg: self.status.setText(f"failed: {msg}"))
+        self.worker.note.connect(lambda msg: self.show_status(msg))
+        self.worker.warn.connect(lambda msg: self.show_status(msg, error=True))
+        self.worker.failed.connect(lambda msg: self.show_status(f"FAILED: {msg}", error=True))
         self.worker.finished.connect(lambda: self.set_running(False))
         self.set_running(True)
-        self.status.setText("starting...")
+        self.show_status("starting...")
         self.worker.start()
+
+    def show_status(self, text, error=False):
+        self.status.setStyleSheet("color: #b3261e; font-weight: bold;" if error else "")
+        self.status.setText(text)
 
     def stop(self):
         if self.worker:
-            self.status.setText("stopping...")
+            self.show_status("stopping...")
             self.worker.stop_flag.set()
 
     def on_event(self, d):
@@ -288,7 +309,7 @@ class NmrPanel(QWidget):
         if not self.last_text or not self.shown or not (self.worker and self.worker.isRunning()):
             return
         age = time.monotonic() - self.last_new
-        self.status.setText(self.last_text + (f"   (no new event for {age:.0f} s)" if age > STALE_S else ""))
+        self.show_status(self.last_text + (f"   (no new event for {age:.0f} s)" if age > STALE_S else ""), error=age > STALE_S)
 
     def shutdown(self):
         if self.worker and self.worker.isRunning():

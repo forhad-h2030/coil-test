@@ -17,8 +17,9 @@ OUT_DIR = Path(__file__).resolve().parent / "data" / "test_nmr"
 BASELINE = OUT_DIR / "test_noRF_baseline.csv"
 RUN = OUT_DIR / "QCV9999999991.csv"
 NPTS, CENTER, STEP = 401, 213.0, 0.002
-TEXT = ["Fake test run", "NMRave.csv", "Unused", "NMRave.csv", "Unused", "Tune2.csv", "", "", "", ""]  # 10 lines per block
-ROW1 = "99999.0000"  # five digits and .0000, which is how the reader finds an event
+TEXT = ["Fake test run", "QCV9999999991.csv", "Unused", "NMRave.csv", "Unused", "Tune2.csv", "", "", "", ""]  # 10 lines per block, as in a real run file
+SETTINGS = [1.0, 23.12, 3.279, 1.868, 1.4806, 8.203, 0.007, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0006, 2.0, 213.026, 0.0, 0.0, 4.0, 2.1333, 33.89]  # 20 lines copied from a real event
+ROW1 = " 35983.0000".strip()  # five digits and .0000 (a day number), which is how the reader finds an event
 rng = np.random.default_rng(1)
 FREQ = CENTER + (np.arange(NPTS) - NPTS // 2) * STEP
 
@@ -34,8 +35,8 @@ def event_curve(k):
 
 
 def event_lines(k):
-    head = TEXT + [ROW1, f"{1000.0 + k:10.4f}", f"{CENTER:10.4f}", f"{STEP:10.4f}", f"{NPTS:10.4f}"]
-    settings = [f"{0.0:10.4f}"] * 20
+    head = TEXT + [ROW1, f"{74281.0 + k + rng.random():10.4f}", f"{CENTER:10.4f}", f"{STEP:10.4f}", f"{NPTS:10.4f}"]
+    settings = [f"{v:10.4f}" for v in SETTINGS]
     return head + settings, [f"{v:10.4f}" for v in event_curve(k)]
 
 
