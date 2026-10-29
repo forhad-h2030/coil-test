@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Test client for set-power-list-server.py: connects to it and sends profiles.
-    python test-profile-client.py                # send the default profile 'span'
-    python test-profile-client.py one three      # send profile 'one', wait, then 'three'
+"""Test client for rf_profile_server.py: connects to it and sends profiles.
+    python rf_profile_test_client.py                # send the default profile 'span'
+    python rf_profile_test_client.py one three      # send profile 'one', wait, then 'three'
 """
 import socket
 import sys

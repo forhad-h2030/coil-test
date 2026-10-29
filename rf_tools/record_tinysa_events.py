@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone tinySA recorder: sweep over and over, one timestamped row per sweep in events.csv.
+"""Standalone tinySA recorder: sweep over and over, one timestamped row per sweep in data/events.csv.
 Config fields come first, then one dBm column per bin (bin_0 ... bin_N-1).
     python record_tinysa_events.py              
     python record_tinysa_events.py --interval 1 # one sweep every second
@@ -9,6 +9,7 @@ import csv
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 
 from tinySA_IO import TinySA
 
@@ -16,7 +17,8 @@ CENTER_HZ = 213e6
 SPAN_HZ = 400e3
 BINS = 500
 RBW_HZ = 1e3
-OUT = "events.csv"
+DATA_DIR = Path(__file__).resolve().parent / "data"  # everything the tools record goes here (ignored by git)
+OUT = str(DATA_DIR / "events.csv")
 CONFIG = ["event_id", "t_sweep", "t_sweep_end", "center_mhz", "span_hz", "bins", "rbw_khz"]
 
 
@@ -31,7 +33,8 @@ def record_event(sa, event_id, center_hz, span_hz, bins, rbw_hz, out):
     if os.path.exists(out):
         with open(out, newline="") as f:
             if next(csv.reader(f), None) != header:  # different grid, so don't mix columns
-                out = f"events_{event_id}.csv"
+                out = os.path.join(os.path.dirname(out), f"events_{event_id}.csv")
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     new_file = not os.path.exists(out)
     with open(out, "a", newline="") as f:
         w = csv.writer(f)

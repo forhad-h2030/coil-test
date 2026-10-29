@@ -11,19 +11,21 @@ Each profile plays once (no repeat); RF then goes off and the script waits for t
 Profiles that arrive while one is playing are handled after it finishes. Every profile is logged to rf_events.jsonl.
 RF turns off when the client disconnects, when a profile is rejected, and on Ctrl+C.
 While a profile plays, tinySA_monitor.py prints the tinySA power per frequency bin, timed from the trigger.
-    python set-power-list-server.py --port 11111              # --no-tinysa to run without the tinySA
+    python rf_profile_server.py --port 11111              # --no-tinysa to run without the tinySA
 """
 import argparse
 import json
 import socket
 import threading
 from datetime import datetime
+from pathlib import Path
 
 import pyvisa
 
 SMA_IP_ADDRESS = "192.168.24.10"
 SMA_ETHERNET_ADDRESS = f"TCPIP0::{SMA_IP_ADDRESS}::inst0::INSTR"
-EVENTS = "rf_events.jsonl"
+DATA_DIR = Path(__file__).resolve().parent / "data"  # everything the tools record goes here (ignored by git)
+EVENTS = DATA_DIR / "rf_events.jsonl"
 LIST_NAME = "tinysa_profile"
 KEYS = {"SOUR:LIST:FREQ": "freq", "SOUR:LIST:POW": "pow", "SOUR:LIST:DWEL": "dwel"}
 DEFAULT_DWELL_S = 0.2  # used for every bin when a profile ends (EOT) without a dwell line
@@ -31,6 +33,7 @@ DEFAULT_DWELL_S = 0.2  # used for every bin when a profile ends (EOT) without a 
 
 def log_event(kind, event_id, **fields):
     line = {"event_id": event_id, "kind": kind, "t": datetime.now().isoformat(), **fields}
+    DATA_DIR.mkdir(exist_ok=True)
     with open(EVENTS, "a") as f:
         f.write(json.dumps(line) + "\n")
 

@@ -6,12 +6,13 @@ Library:
         # -> list of (bin, freq_hz, dbm, mw)
 CLI:
     python tinySA_IO.py            # uses the defaults below
-    python tinySA_IO.py --center 213e6 --span 400e3 --bins 500 --rbw 10e3 --out bins.csv   # all optional
+    python tinySA_IO.py --center 213e6 --span 400e3 --bins 500 --rbw 10e3 --out data/bins.csv   # all optional
 """
 import argparse
 import csv
 import re
 import time
+from pathlib import Path
 
 import numpy as np
 import serial
@@ -22,7 +23,8 @@ CENTER_HZ = 213e6
 SPAN_HZ = 400e3
 BINS = 500
 RBW_HZ = 1e3
-OUT = "bins.csv"
+DATA_DIR = Path(__file__).resolve().parent / "data"  # everything the tools record goes here (ignored by git)
+OUT = str(DATA_DIR / "bins.csv")
 
 MAX_SCAN = 250     # the tinySA rejects large scans, so longer grids are stitched
 
@@ -144,6 +146,7 @@ def main():
     for i, f, d, mw in rows:
         print(f"{i:5d} {f / 1e6:12.4f} {d:9.2f} {mw:12.4g}")
     if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         with open(a.out, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["bin", "center_mhz", "freq_mhz", "dbm", "mw"])

@@ -4,8 +4,8 @@
 Each sweep gives one reading per bin: the level through the RBW filter at that frequency, not integrated over the bin.
 Averaging is done in linear power (mW) over the last N sweeps, then shown in the chosen unit.
 The settings are read at Start, so stop and start again to change them. The tinySA serial port can only be used by
-one program at a time (not together with set-power-list-server.py or gui_generator_profile.py).
-Save CSV (off by default) writes every raw sweep, one row per bin, to spectrum_<time>.csv in this folder.
+one program at a time (not together with rf_profile_server.py or gui_generator_profile.py).
+Save CSV (off by default) writes every raw sweep, one row per bin, to data/spectrum_<time>.csv.
 Read generator (on by default) asks the generator for its current output state, mode, frequency and power once a
 second and shows them with a marker on the plot. It needs no server. If the generator cannot be reached, the tinySA
 part keeps working. Until you press a button it only sends queries.
@@ -22,6 +22,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
@@ -39,7 +40,8 @@ GEN_COLOR = "#eb6834"  # categorical slot 2: the generator marker
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
 GENERATOR_IP = "192.168.24.10"
 MAX_POWER_DBM = 0.0  # cap for the Set control: the tinySA input must not see more (add an attenuator above this)
-EVENTS = "rf_events.jsonl"
+DATA_DIR = Path(__file__).resolve().parent / "data"  # everything the tools record goes here (ignored by git)
+EVENTS = DATA_DIR / "rf_events.jsonl"
 
 
 class SweepThread(QThread):
@@ -66,6 +68,7 @@ def log_event(kind, freq_hz, power_dbm):
     """One line in rf_events.jsonl, the same format as set_cw_tone.py, so one file records every RF change."""
     line = {"event_id": f"{datetime.now():%Y%m%d_%H%M%S}", "kind": kind, "t": datetime.now().isoformat(),
             "freq_mhz": None if freq_hz is None else freq_hz / 1e6, "power_dbm": power_dbm}
+    DATA_DIR.mkdir(exist_ok=True)
     with open(EVENTS, "a") as f:
         f.write(json.dumps(line) + "\n")
 
@@ -376,16 +379,17 @@ class MainWindow(QMainWindow):
             self.open_csv() if on else self.close_csv()
 
     def open_csv(self):
-        name = f"spectrum_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        DATA_DIR.mkdir(exist_ok=True)
+        name = DATA_DIR / f"spectrum_{datetime.now():%Y%m%d_%H%M%S}.csv"
         self.csv_file = open(name, "w", newline="")
         self.csv_writer = csv.writer(self.csv_file)
         self.csv_writer.writerow(["time", "sweep", "freq_mhz", "dbm", "mw"])
-        self.saved.setText(f"saving to {name}")
+        self.saved.setText(f"saving to data/{name.name}")
 
     def close_csv(self):
         if self.csv_file:
             self.csv_file.close()
-            self.saved.setText(f"saved {self.csv_file.name}")
+            self.saved.setText(f"saved data/{Path(self.csv_file.name).name}")
         self.csv_file = self.csv_writer = None
 
     def on_sweep(self, rows, seconds):

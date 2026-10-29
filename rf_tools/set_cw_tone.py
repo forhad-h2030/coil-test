@@ -6,12 +6,14 @@ Each on and off is logged to rf_events.jsonl. It never touches the tinySA.
 import argparse
 import json
 from datetime import datetime
+from pathlib import Path
 
 import pyvisa
 
 SMA_IP_ADDRESS = "192.168.24.10"
 SMA_ETHERNET_ADDRESS = f"TCPIP0::{SMA_IP_ADDRESS}::inst0::INSTR"
-EVENTS = "rf_events.jsonl"
+DATA_DIR = Path(__file__).resolve().parent / "data"  # everything the tools record goes here (ignored by git)
+EVENTS = DATA_DIR / "rf_events.jsonl"
 FREQ_MHZ = 213.0
 POWER_DBM = -10.0
 
@@ -20,6 +22,7 @@ def log_event(kind, event_id, freq_mhz, power_dbm):
     """Append one event line; the recorder acts on kind == 'on'."""
     line = {"event_id": event_id, "kind": kind, "t": datetime.now().isoformat(),
             "freq_mhz": freq_mhz, "power_dbm": power_dbm}
+    DATA_DIR.mkdir(exist_ok=True)
     with open(EVENTS, "a") as f:
         f.write(json.dumps(line) + "\n")
 

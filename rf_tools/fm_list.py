@@ -6,7 +6,7 @@ import pyvisa
 # Same frequency grid and power range as fm.py, but the SMA100B steps through the
 # points itself (list mode) with a hardware dwell, instead of Python stepping it.
 
-SMA_IP_ADDRESS = "192.168.1.10"
+SMA_IP_ADDRESS = "192.168.24.10"
 SMA_ETHERNET_ADDRESS = f"TCPIP0::{SMA_IP_ADDRESS}::inst0::INSTR"
 
 START_FREQ = 212.8e6

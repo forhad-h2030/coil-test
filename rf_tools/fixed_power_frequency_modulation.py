@@ -5,7 +5,7 @@ import argparse
 import pyvisa
 
 
-DEFAULT_IP = "192.168.1.10"
+DEFAULT_IP = "192.168.24.10"
 WAVEFORMS = ("SINE", "SQUare", "PULSe", "TRIangle", "TRAPeze")
 
 

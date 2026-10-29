@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Window for set-power-list-server.py: set power vs measured power per frequency bin.
+"""Window for rf_profile_server.py: set power vs measured power per frequency bin.
     python gui_generator_profile.py
 Start runs the server (generator + tinySA) in a background thread; Stop turns RF off and closes both.
 Measured power of a step = the tinySA sample of that step's own bin taken closest to the middle of the step's
 dwell (a sweep visits its bins one after another, so each bin's sample time is spread across the sweep).
-Save CSV (off by default) appends one row per step to generator_profile.csv when a pass ends.
+Save CSV (off by default) appends one row per step to data/generator_profile.csv when a pass ends.
 """
 import contextlib
 import csv
-import importlib.util
 import socket
 import sys
 import threading
@@ -25,7 +24,8 @@ from PyQt6.QtWidgets import (
 
 SET_COLOR, MEAS_COLOR = "#2a78d6", "#eb6834"  # categorical slots 1 and 2, validated on the surface below
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
-CSV_PATH = "generator_profile.csv"
+DATA_DIR = Path(__file__).resolve().parent / "data"  # everything the tools record goes here (ignored by git)
+CSV_PATH = DATA_DIR / "generator_profile.csv"
 
 
 def measure_steps(freq_hz, dwell_s, sweeps):
@@ -73,10 +73,7 @@ class ServerThread(QThread):
 
     def run(self):
         try:
-            spec = importlib.util.spec_from_file_location(
-                "rf_server", Path(__file__).with_name("set-power-list-server.py"))
-            server = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(server)
+            import rf_profile_server as server  # imported here so a missing pyvisa shows up in the window
             with contextlib.redirect_stdout(_Log(self.log.emit)):
                 server.serve(self.host, self.port, self.use_tinysa, on_event=self.happened.emit, stop=self.stop_flag)
         except Exception as e:
@@ -202,6 +199,7 @@ class MainWindow(QMainWindow):
             return
         meas = measure_steps(p["freq_hz"], p["dwell_s"], self.sweeps)
         when = self.trigger_time.isoformat(timespec="milliseconds") if self.trigger_time else ""
+        DATA_DIR.mkdir(exist_ok=True)
         with open(CSV_PATH, "a", newline="") as f:
             w = csv.writer(f)
             if f.tell() == 0:
@@ -211,7 +209,7 @@ class MainWindow(QMainWindow):
                 w.writerow([p["event_id"], when, k, f"{fr / 1e6:.6f}", d, s, f"{10 ** (s / 10):.6g}",
                             "" if m is None else f"{m:.3f}", "" if m is None else f"{10 ** (m / 10):.6g}",
                             "" if m is None else f"{m - s:+.2f}"])
-        self.log.appendPlainText(f"saved {len(meas)} steps to {CSV_PATH}")
+        self.log.appendPlainText(f"saved {len(meas)} steps to data/{CSV_PATH.name}")
 
     def refresh(self):
         unit = self.unit.currentText()
