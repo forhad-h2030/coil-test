@@ -90,6 +90,23 @@ def apply_profile(sma, profile):
     return sum(profile["dwel"])
 
 
+def read_lines(soc):
+    """Yield newline-terminated lines until the client closes. The 1 s timeout lets Ctrl+C through on Windows."""
+    soc.settimeout(1.0)
+    buf = b""
+    while True:
+        try:
+            data = soc.recv(4096)
+        except socket.timeout:
+            continue
+        if not data:
+            return
+        buf += data
+        while b"\n" in buf:
+            raw, buf = buf.split(b"\n", 1)
+            yield raw.decode(errors="replace")
+
+
 def main():
     p = argparse.ArgumentParser(description="Receive power profiles from a client and load them into the generator.")
     p.add_argument("--host", default=socket.gethostname(), help="address to listen on (default: this machine)")
@@ -103,14 +120,18 @@ def main():
     soc_svr.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     soc_svr.bind((a.host, a.port))
     soc_svr.listen(1)
+    soc_svr.settimeout(1.0)  # so Ctrl+C is noticed while waiting for a client (Windows)
     print(f"Wait on {a.host}:{a.port} for a profile (Ctrl+C to stop)...")
     try:
         while True:
-            soc, addr = soc_svr.accept()
+            try:
+                soc, addr = soc_svr.accept()
+            except socket.timeout:
+                continue
             print(f"Accept: {addr}.")
             pending = {}
             with soc:
-                for raw in soc.makefile("r", newline="\n"):
+                for raw in read_lines(soc):
                     line = raw.strip()
                     if not line:
                         continue
