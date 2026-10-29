@@ -9,7 +9,8 @@ The client sends newline-terminated lines (frequency in Hz, power in dBm, dwell 
 Each profile plays once (no repeat); RF then goes off and the script waits for the next one.
 Profiles that arrive while one is playing are handled after it finishes. Every profile is logged to rf_events.jsonl.
 RF turns off when the client disconnects, when a profile is rejected, and on Ctrl+C.
-    python set-power-list-server.py --port 11111
+While a profile plays, tinySA_monitor.py prints the tinySA power per frequency bin, timed from the trigger.
+    python set-power-list-server.py --port 11111              # --no-tinysa to run without the tinySA
 """
 import argparse
 import json
@@ -49,10 +50,13 @@ def complete(profile):
     return all(k in profile for k in KEYS.values())
 
 
-def send(sma, command):
-    """Write one SCPI command; fail with the generator's own error text if it rejects it."""
+def send(sma, command, after_write=None):
+    """Write one SCPI command; fail with the generator's own error text if it rejects it.
+    after_write runs immediately after the write, before the error check."""
     print(f"  > {command}")
     sma.write(command)
+    if after_write:
+        after_write()
     err = sma.query("SYSTem:ERRor?").strip()
     if not err.startswith("0"):
         raise RuntimeError(f"{command!r} rejected: {err}")
@@ -67,8 +71,9 @@ def ask(sma, command):
         raise RuntimeError(f"{command!r} got no answer: {e}") from e
 
 
-def apply_profile(sma, profile):
-    """Load the lists with RF off, then start one pass of the list. Returns the pass duration in s."""
+def apply_profile(sma, profile, on_start=None):
+    """Load the lists with RF off, then start one pass of the list. Returns the pass duration in s.
+    on_start is called right after the trigger is written."""
     n = len(profile["freq"])
     if not (n == len(profile["pow"]) == len(profile["dwel"])) or n == 0:
         raise ValueError(f"list lengths differ: freq {n}, pow {len(profile['pow'])}, dwel {len(profile['dwel'])}")
@@ -91,7 +96,7 @@ def apply_profile(sma, profile):
     send(sma, "SOURce:LIST:TRIGger:SOURce SINGle")  # one pass per trigger, no repeat
     send(sma, "OUTPut:STATe ON")  # the generator refuses list mode while RF is off
     send(sma, "SOURce:FREQuency:MODE LIST")
-    send(sma, "SOURce:LIST:TRIGger:EXECute")
+    send(sma, "SOURce:LIST:TRIGger:EXECute", after_write=on_start)
     return sum(profile["dwel"])
 
 
@@ -116,11 +121,17 @@ def main():
     p = argparse.ArgumentParser(description="Receive power profiles from a client and load them into the generator.")
     p.add_argument("--host", default=socket.gethostname(), help="address to listen on (default: this machine)")
     p.add_argument("--port", type=int, default=11111, help="port to listen on (default 11111)")
+    p.add_argument("--no-tinysa", action="store_true", help="do not read the tinySA while a profile plays")
     a = p.parse_args()
 
     rm = pyvisa.ResourceManager()
     sma = rm.open_resource(SMA_ETHERNET_ADDRESS, timeout=5000)
     print(f"Connected to RF Gen: {sma.query('*IDN?').strip()}")
+    monitor = None
+    if not a.no_tinysa:
+        from tinySA_monitor import Monitor  # opened now, so nothing is opened while a profile plays
+        monitor = Monitor()
+        print("Connected to tinySA")
     soc_svr = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     soc_svr.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     soc_svr.bind((a.host, a.port))
@@ -145,15 +156,21 @@ def main():
                     if complete(pending):
                         event_id = f"{datetime.now():%Y%m%d_%H%M%S}"
                         try:
-                            duration = apply_profile(sma, pending)
+                            if monitor:
+                                monitor.arm(pending["freq"], sum(pending["dwel"]))  # parked until the trigger
+                            duration = apply_profile(sma, pending, on_start=monitor.go if monitor else None)
                             log_event("profile", event_id, freq_hz=pending["freq"], power_dbm=pending["pow"],
                                       dwell_s=pending["dwel"])
                             print(f"-> profile {event_id}: {len(pending['freq'])} bins live for {duration:g} s")
                             time.sleep(duration + 0.1)
                             sma.write("OUTPut:STATe OFF")
+                            if monitor:
+                                monitor.wait()  # RF is already off; let the last sweep finish printing
                             print("profile done, RF off, waiting for the next one")
                         except (ValueError, RuntimeError, pyvisa.VisaIOError) as e:
                             sma.write("OUTPut:STATe OFF")
+                            if monitor:
+                                monitor.cancel()
                             print(f"profile rejected, RF off: {e}")
                         pending = {}
                     elif line.upper() == "EOT":
@@ -168,6 +185,8 @@ def main():
         sma.close()
         soc_svr.close()
         log_event("off", f"{datetime.now():%Y%m%d_%H%M%S}")
+        if monitor:
+            monitor.close()
         print("Generator safely disconnected.")
 
 
