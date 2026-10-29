@@ -23,7 +23,8 @@ from PyQt6.QtWidgets import (
 )
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / "plotting"))  # lanl_events.py (the run-file reader) lives there
+PLOTTING = HERE.parent / "plotting"
+sys.path.insert(0, str(PLOTTING))  # lanl_events.py (the run-file reader) lives there
 from lanl_events import read_events, read_latest  # noqa: E402
 from gui_live_spectrum import MainWindow as SpectrumWindow  # noqa: E402
 
@@ -32,11 +33,12 @@ DATA_ROOTS = [  # the first one that exists is searched, day subfolders included
     Path(r"\\PHYS-NUC6\Users\Ptgroup\Desktop\data_2026"),  # the NMR computer, seen from the lab PC
     Path("/Users/spin/UVA-Lab-Software/LANL-System/rssmt/data/config"),  # the same files on the Mac
 ]
-REF_FILE = HERE.parent / "plotting" / "NMRave_noRF.csv"  # default baseline: one no-RF NMR event
+REF_FILE = PLOTTING / "NMRave_noRF.csv"  # default baseline: one no-RF NMR event
 REF_EVENT = 0  # when REF_FILE is missing, this 0-based event of the run is the baseline
 POLL_S = 1.0  # seconds between checks of the run file
 STALE_S = 5.0  # warn when no new event arrived for this long
 # ------------------------------------------------------------------------------------------------------------
+FIT_WAITING = "Gaussian fit of the dip: waiting for an event"
 BASE_COLOR, EVENT_COLOR = "#2a78d6", "#eb6834"  # categorical slots 1 and 2, validated on the surface below
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
 
@@ -79,8 +81,9 @@ def read_baseline_file(path):
                 try:
                     values.append(float(line))
                 except ValueError:
-                    raise ValueError(f"{Path(path).name}, line {n}: '{line.strip()[:30]}' is not a number "
-                                     "(use a run file like QCV....csv or a baseline file with 4 header lines, then one value per line)") from None
+                    raise ValueError(f"{Path(path).name}, line {n}: '{line.strip()[:30]}' is not a number (use a run "
+                                     "file like QCV....csv or a baseline file: 4 header lines, then one value per "
+                                     "line)") from None
     if len(values) <= 4:
         raise ValueError(f"{Path(path).name} holds only {len(values)} numbers: no baseline values after the header")
     return np.array(values[4:])
@@ -91,13 +94,59 @@ def read_baseline(path, event_no):
     name = Path(path).name
     try:
         events = read_events(path)[0]
-    except (OSError, ValueError):
+    except ValueError:  # not a run file: try it as a single-event baseline file (an OSError is raised as it is)
         events = []
     if events:
         if len(events) <= event_no:
-            raise ValueError(f"{name} is a run file with {len(events)} events: no event {event_no} to use as the baseline")
+            raise ValueError(f"{name} is a run file with {len(events)} events: no event {event_no} to use "
+                             "as the baseline")
         return events[event_no]["amp"], f"event {event_no} of {name}"
     return read_baseline_file(path), name
+
+
+def fit_gaussian(freq, diff, min_snr=5.0):
+    """Fit amp * exp(-(f - f0)^2 / (2 sigma^2)) to the dip or peak of diff (event minus baseline), in MHz and V.
+    The fit is a parabola through ln|y| over the part of the curve above 20 % of the peak (so no scipy is needed
+    and the noise at the edges does not pull it). Returns None if there is no clear Gaussian, else a dict with
+    f0, sigma, amp, fwhm (-6 dB for an amplitude), bw3 (-3 dB: amplitude at 0.707 of the peak), snr."""
+    freq, diff = np.asarray(freq, float), np.asarray(diff, float)
+    edge = np.r_[diff[:len(diff) // 10], diff[-(len(diff) // 10):]]
+    offset = np.median(edge)
+    noise = 1.4826 * np.median(np.abs(edge - offset)) or 1e-12
+    y = diff - offset
+    k = int(np.argmax(np.abs(y)))
+    peak = y[k]
+    if abs(peak) < min_snr * noise:
+        return None
+    y = y / peak                                   # the main lobe is now positive and peaks at 1
+    lobe = y > 0.2
+    lo = k
+    while lo > 0 and lobe[lo - 1]:
+        lo -= 1
+    hi = k
+    while hi < len(y) - 1 and lobe[hi + 1]:
+        hi += 1
+    if hi - lo < 4:
+        return None                                # too few points above 20 %
+    x, ln = freq[lo:hi + 1] - freq[k], np.log(y[lo:hi + 1])
+    a, b, c = np.polyfit(x, ln, 2, w=y[lo:hi + 1])  # the strong points count most
+    if a >= 0:
+        return None
+    sigma = (-1 / (2 * a)) ** 0.5
+    f0, amp = freq[k] - b / (2 * a), peak * np.exp(c - b * b / (4 * a))
+    for _ in range(20):                            # polish with Gauss-Newton on the whole curve (the log fit is biased)
+        g = np.exp(-(freq - f0) ** 2 / (2 * sigma ** 2))
+        jac = np.stack([g, amp * g * (freq - f0) / sigma ** 2, amp * g * (freq - f0) ** 2 / sigma ** 3], axis=1)
+        try:
+            step = np.linalg.lstsq(jac, (diff - offset) - amp * g, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            break
+        amp, f0, sigma = amp + step[0], f0 + step[1], abs(sigma + step[2])
+        if np.all(np.abs(step) < 1e-9):
+            break
+    return {"f0": f0, "sigma": sigma, "amp": amp,
+            "fwhm": 2 * np.sqrt(2 * np.log(2)) * sigma, "bw3": 2 * np.sqrt(np.log(2)) * sigma,
+            "snr": abs(peak) / noise, "offset": offset}
 
 
 class NmrThread(QThread):
@@ -138,11 +187,12 @@ class NmrThread(QThread):
             else:
                 def event_amp():
                     try:
-                        events = read_events(path)[0] if path.stat().st_size else []
+                        size = path.stat().st_size
+                        events = read_events(path)[0] if size else []
                     except (OSError, ValueError) as e:  # file busy, mid-write, or not a run file
                         self.hint = f"cannot read {path.name} yet: {e}"
                         return None
-                    self.hint = "" if events or not path.stat().st_size else \
+                    self.hint = "" if events or not size else \
                         f"{path.name} holds no NMR events: is it a run file like QCV....csv?"
                     return events[self.base_event]["amp"] if len(events) > self.base_event else None
                 base = self._wait_for(f"event {self.base_event} of the run", event_amp)
@@ -188,7 +238,7 @@ def make_plot(title):
 class NmrPanel(QWidget):
     def __init__(self):
         super().__init__()
-        self.worker = None
+        self.worker, self.failed = None, False
         self.last_text, self.last_new, self.shown = "", time.monotonic(), 0
 
         self.event_edit = QLineEdit()
@@ -209,8 +259,8 @@ class NmrPanel(QWidget):
         self.stop_btn.setEnabled(False)
         self.status = QLabel("stopped")
 
-        self.event_btn.clicked.connect(self.browse_event)
-        self.base_btn.clicked.connect(self.browse_base)
+        self.event_btn.clicked.connect(lambda: self.browse(self.event_edit, "Event (run) file"))
+        self.base_btn.clicked.connect(lambda: self.browse(self.base_edit, "Baseline file"))
         self.defaults_btn.clicked.connect(self.defaults)
         self.start_btn.clicked.connect(self.start)
         self.stop_btn.clicked.connect(self.stop)
@@ -225,17 +275,21 @@ class NmrPanel(QWidget):
         self.bottom.setXLink(self.top)
         self.bottom.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen(INK_2, width=1)))
         self.diff_curve = self.bottom.plot(pen=pg.mkPen(INK, width=2))
+        self.fit_curve = self.bottom.plot(pen=pg.mkPen(EVENT_COLOR, width=2, style=Qt.PenStyle.DashLine))
+        self.fit_label = QLabel(FIT_WAITING)
 
-        row1 = QHBoxLayout()
-        for w in (QLabel("event file"), self.event_edit, self.event_btn):
-            row1.addWidget(w)
-        row1.setStretch(1, 1)
-        row2 = QHBoxLayout()
-        for w in (QLabel("baseline file"), self.base_edit, self.base_btn):
-            row2.addWidget(w)
-        row2.setStretch(1, 1)
+        def file_row(label, edit, button):
+            row = QHBoxLayout()
+            for w in (QLabel(label), edit, button):
+                row.addWidget(w)
+            row.setStretch(1, 1)
+            return row
+
+        row1 = file_row("event file", self.event_edit, self.event_btn)
+        row2 = file_row("baseline file", self.base_edit, self.base_btn)
         row3 = QHBoxLayout()
-        for w in (QLabel("no baseline file: use event"), self.base_event, QLabel("of the run"), QLabel("poll"), self.poll):
+        for w in (QLabel("no baseline file: use event"), self.base_event, QLabel("of the run"), QLabel("poll"),
+                  self.poll):
             row3.addWidget(w)
         row3.addStretch(1)
         for w in (self.defaults_btn, self.start_btn, self.stop_btn):
@@ -246,6 +300,7 @@ class NmrPanel(QWidget):
         root.addLayout(row2)
         root.addLayout(row3)
         root.addWidget(self.status)
+        root.addWidget(self.fit_label)
         root.addWidget(self.top, 3)
         root.addWidget(self.bottom, 2)
 
@@ -268,12 +323,6 @@ class NmrPanel(QWidget):
         if path:
             edit.setText(path)
 
-    def browse_event(self):
-        self.browse(self.event_edit, "Event (run) file")
-
-    def browse_base(self):
-        self.browse(self.base_edit, "Baseline file")
-
     def set_running(self, running):
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
@@ -287,17 +336,28 @@ class NmrPanel(QWidget):
             self.show_status(f"FAILED: baseline file not found: {base_file}", error=True)
             return
         self.shown = 0
-        for c in (self.base_curve, self.event_curve, self.diff_curve):
+        for c in (self.base_curve, self.event_curve, self.diff_curve, self.fit_curve):
             c.setData([], [])
+        self.fit_label.setText(FIT_WAITING)
         self.worker = NmrThread(self.event_edit.text(), base_file, self.base_event.value(), self.poll.value())
         self.worker.got_event.connect(self.on_event)
         self.worker.note.connect(lambda msg: self.show_status(msg))
         self.worker.warn.connect(lambda msg: self.show_status(msg, error=True))
-        self.worker.failed.connect(lambda msg: self.show_status(f"FAILED: {msg}", error=True))
-        self.worker.finished.connect(lambda: self.set_running(False))
+        self.worker.failed.connect(self.on_failed)
+        self.worker.finished.connect(self.on_finished)
+        self.failed = False
         self.set_running(True)
         self.show_status("starting...")
         self.worker.start()
+
+    def on_failed(self, msg):
+        self.failed = True
+        self.show_status(f"FAILED: {msg}", error=True)
+
+    def on_finished(self):
+        self.set_running(False)
+        if not self.failed:  # a failure message stays on screen
+            self.show_status("stopped")
 
     def show_status(self, text, error=False):
         self.status.setStyleSheet("color: #b3261e; font-weight: bold;" if error else "")
@@ -313,11 +373,25 @@ class NmrPanel(QWidget):
         self.base_curve.setData(d["freq"], d["base"])
         self.event_curve.setData(d["freq"], d["amp"])
         self.diff_curve.setData(d["freq"], diff)
+        self.show_fit(d["freq"], diff)
         self.top.setTitle(f"Latest NMR event and baseline ({d['base_name']})", color=INK_2, size="10pt")
         self.last_text = (f"{d['file']}   latest event {d['ident'][0]:.0f}-{d['ident'][1]:.4f}   "
                           f"max |diff| {np.abs(diff).max():.4f} V")
         self.last_new, self.shown = time.monotonic(), self.shown + 1
         self.tick()
+
+    def show_fit(self, freq, diff):
+        fit = fit_gaussian(freq, diff)
+        if fit is None:
+            self.fit_curve.setData([], [])
+            self.fit_label.setText("Gaussian fit of the dip: no clear Gaussian in event minus baseline")
+            return
+        gauss = np.exp(-(freq - fit["f0"]) ** 2 / (2 * fit["sigma"] ** 2))
+        self.fit_curve.setData(freq, fit["offset"] + fit["amp"] * gauss)
+        self.fit_label.setText(
+            f"Gaussian fit of the dip:   center {fit['f0']:.4f} MHz   sigma {fit['sigma'] * 1e3:.2f} kHz   "
+            f"BW at -3 dB {fit['bw3'] * 1e3:.2f} kHz   (FWHM, -6 dB: {fit['fwhm'] * 1e3:.2f} kHz)   "
+            f"depth {fit['amp'] * 1e3:.2f} mV   S/N {fit['snr']:.0f}")
 
     def tick(self):
         if not self.last_text or not self.shown or not (self.worker and self.worker.isRunning()):
