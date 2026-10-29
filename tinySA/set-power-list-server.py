@@ -17,7 +17,6 @@ import argparse
 import json
 import socket
 import threading
-import time
 from datetime import datetime
 
 import pyvisa
@@ -131,6 +130,7 @@ def serve(host, port, use_tinysa=True, on_event=None, stop=None):
         status   text      where the server is: waiting, loading, playing, ...
         profile  dict      freq_hz, power_dbm, dwell_s of the profile about to play
         start    datetime  the generator was triggered
+        done     None      the pass is over, RF is off and the last sweep has been delivered
         sweep    dict      t0, t1 (s since the trigger) and rows [(bin, freq_hz, dbm, mw)] of one tinySA sweep
     """
     stop = stop or threading.Event()
@@ -199,6 +199,7 @@ def serve(host, port, use_tinysa=True, on_event=None, stop=None):
                                     monitor.wait()  # RF is already off; let the last sweep finish
                             print("profile done, RF off, waiting for the next one")
                             emit("status", "profile done, RF off, waiting for the next profile")
+                            emit("done", None)
                         except (ValueError, RuntimeError, pyvisa.VisaIOError) as e:
                             sma.write("OUTPut:STATe OFF")
                             if monitor:
@@ -207,7 +208,8 @@ def serve(host, port, use_tinysa=True, on_event=None, stop=None):
                             emit("status", f"profile rejected, RF off: {e}")
                         pending = {}
                     elif line.upper() == "EOT":
-                        print("EOT with an incomplete profile, discarded")
+                        if pending:  # an EOT after a profile that already played is just the end marker
+                            print("EOT with an incomplete profile, discarded")
                         pending = {}
             sma.write("OUTPut:STATe OFF")
             print("Client closed the connection, RF off.")

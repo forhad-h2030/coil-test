@@ -4,12 +4,15 @@
 Start runs the server (generator + tinySA) in a background thread; Stop turns RF off and closes both.
 Measured power of a step = the tinySA sample of that step's own bin taken closest to the middle of the step's
 dwell (a sweep visits its bins one after another, so each bin's sample time is spread across the sweep).
+Save CSV (off by default) appends one row per step to generator_profile.csv when a pass ends.
 """
 import contextlib
+import csv
 import importlib.util
 import socket
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 SET_COLOR, MEAS_COLOR = "#2a78d6", "#eb6834"  # categorical slots 1 and 2, validated on the surface below
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
+CSV_PATH = "generator_profile.csv"
 
 
 def measure_steps(freq_hz, dwell_s, sweeps):
@@ -96,6 +100,8 @@ class MainWindow(QMainWindow):
         self.unit = QComboBox()
         self.unit.addItems(["dBm", "mW"])
         self.unit.currentTextChanged.connect(lambda _: self.refresh())
+        self.save = QCheckBox("save CSV")  # off by default
+        self.trigger_time = None
         self.start_btn = QPushButton("Start")
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setEnabled(False)
@@ -130,7 +136,7 @@ class MainWindow(QMainWindow):
 
         bar = QHBoxLayout()
         for w in (QLabel("host"), self.host, QLabel("port"), self.port, self.use_tinysa, QLabel("power in"),
-                  self.unit, self.start_btn, self.stop_btn):
+                  self.unit, self.save, self.start_btn, self.stop_btn):
             bar.addWidget(w)
         info = QHBoxLayout()
         info.addWidget(self.status, 1)
@@ -182,10 +188,30 @@ class MainWindow(QMainWindow):
             self.triggered.setText("")
             self.refresh()
         elif kind == "start":
+            self.trigger_time = data
             self.triggered.setText(f"triggered {data:%H:%M:%S.%f}"[:-3])
         elif kind == "sweep":
             self.sweeps.append(data)
             self.refresh()
+        elif kind == "done" and self.save.isChecked():
+            self.save_pass()
+
+    def save_pass(self):
+        p = self.profile
+        if not p:
+            return
+        meas = measure_steps(p["freq_hz"], p["dwell_s"], self.sweeps)
+        when = self.trigger_time.isoformat(timespec="milliseconds") if self.trigger_time else ""
+        with open(CSV_PATH, "a", newline="") as f:
+            w = csv.writer(f)
+            if f.tell() == 0:
+                w.writerow(["event_id", "triggered", "step", "freq_mhz", "dwell_s", "set_dbm", "set_mw",
+                            "measured_dbm", "measured_mw", "diff_db"])
+            for k, (fr, d, s, m) in enumerate(zip(p["freq_hz"], p["dwell_s"], p["power_dbm"], meas), 1):
+                w.writerow([p["event_id"], when, k, f"{fr / 1e6:.6f}", d, s, f"{10 ** (s / 10):.6g}",
+                            "" if m is None else f"{m:.3f}", "" if m is None else f"{10 ** (m / 10):.6g}",
+                            "" if m is None else f"{m - s:+.2f}"])
+        self.log.appendPlainText(f"saved {len(meas)} steps to {CSV_PATH}")
 
     def refresh(self):
         unit = self.unit.currentText()
