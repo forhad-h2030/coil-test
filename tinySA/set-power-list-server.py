@@ -78,8 +78,11 @@ def apply_profile(sma, profile):
     send(sma, f'SOURce:LIST:SELect "{LIST_NAME}"')
     send(sma, "SOURce:LIST:FREQuency " + ",".join(f"{v:.0f}" for v in profile["freq"]))
     send(sma, "SOURce:LIST:POWer " + ",".join(f"{v}" for v in profile["pow"]))
-    send(sma, "SOURce:LIST:DWELl " + ",".join(f"{v}" for v in profile["dwel"]))
-    for q in ("FREQuency", "POWer", "DWELl"):
+    if len(set(profile["dwel"])) == 1:  # the generator's DWELl takes one value for the whole list
+        send(sma, f"SOURce:LIST:DWELl {profile['dwel'][0]}")
+    else:
+        send(sma, "SOURce:LIST:DWELl:LIST " + ",".join(f"{v}" for v in profile["dwel"]))
+    for q in ("FREQuency", "POWer"):
         if int(ask(sma, f"SOURce:LIST:{q}:POINts?")) != n:
             raise RuntimeError(f"generator holds the wrong number of {q} points")
     send(sma, "SOURce:LIST:MODE AUTO")
