@@ -80,10 +80,24 @@ def read_baseline_file(path):
                     values.append(float(line))
                 except ValueError:
                     raise ValueError(f"{Path(path).name}, line {n}: '{line.strip()[:30]}' is not a number "
-                                     "(a baseline file has 4 header lines, then one value per line)") from None
+                                     "(use a run file like QCV....csv or a baseline file with 4 header lines, then one value per line)") from None
     if len(values) <= 4:
         raise ValueError(f"{Path(path).name} holds only {len(values)} numbers: no baseline values after the header")
     return np.array(values[4:])
+
+
+def read_baseline(path, event_no):
+    """A baseline is either a run file (event number event_no of it is used) or a single-event baseline file."""
+    name = Path(path).name
+    try:
+        events = read_events(path)[0]
+    except (OSError, ValueError):
+        events = []
+    if events:
+        if len(events) <= event_no:
+            raise ValueError(f"{name} is a run file with {len(events)} events: no event {event_no} to use as the baseline")
+        return events[event_no]["amp"], f"event {event_no} of {name}"
+    return read_baseline_file(path), name
 
 
 class NmrThread(QThread):
@@ -120,7 +134,7 @@ class NmrThread(QThread):
             self.note.emit(f"run file: {path.name}")
             self.hint = ""
             if self.base_file:
-                base, base_name = read_baseline_file(self.base_file), Path(self.base_file).name
+                base, base_name = read_baseline(self.base_file, self.base_event)
             else:
                 def event_amp():
                     try:
