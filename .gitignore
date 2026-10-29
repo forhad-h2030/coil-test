@@ -20,3 +20,9 @@ __pycache__/
 
 !requirements.txt
 !CMakeLists.txt
+
+# RF event logs written by set_cw_tone.py, the profile server and the windows
+*.jsonl
+
+# Everything the tools record goes in data/
+data/

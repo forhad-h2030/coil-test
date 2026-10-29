@@ -7,10 +7,16 @@ The settings are read at Start, so stop and start again to change them. The tiny
 one program at a time (not together with set-power-list-server.py or gui_generator_profile.py).
 Save CSV (off by default) writes every raw sweep, one row per bin, to spectrum_<time>.csv in this folder.
 Read generator (on by default) asks the generator for its current output state, mode, frequency and power once a
-second and shows them with a marker on the plot. It only sends queries, never changes the generator, and it needs
-no server. If the generator cannot be reached, the tinySA part keeps working.
+second and shows them with a marker on the plot. It needs no server. If the generator cannot be reached, the tinySA
+part keeps working. Until you press a button it only sends queries.
+Set and RF on holds one CW frequency and power (like set_cw_tone.py, up to MAX_POWER_DBM); RF off stops it. RF goes
+off first, before the new settings go in, and off again if the generator rejects a command, when Stop is pressed
+or when the window closes (only if this window switched it on). Each change is logged to rf_events.jsonl.
 """
+import contextlib
 import csv
+import json
+import queue
 import sys
 import threading
 import time
@@ -32,6 +38,8 @@ LINE_COLOR = "#2a78d6"  # categorical slot 1, validated on the surface below
 GEN_COLOR = "#eb6834"  # categorical slot 2: the generator marker
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
 GENERATOR_IP = "192.168.24.10"
+MAX_POWER_DBM = 0.0  # cap for the Set control: the tinySA input must not see more (add an attenuator above this)
+EVENTS = "rf_events.jsonl"
 
 
 class SweepThread(QThread):
@@ -54,15 +62,60 @@ class SweepThread(QThread):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
+def log_event(kind, freq_hz, power_dbm):
+    """One line in rf_events.jsonl, the same format as set_cw_tone.py, so one file records every RF change."""
+    line = {"event_id": f"{datetime.now():%Y%m%d_%H%M%S}", "kind": kind, "t": datetime.now().isoformat(),
+            "freq_mhz": None if freq_hz is None else freq_hz / 1e6, "power_dbm": power_dbm}
+    with open(EVENTS, "a") as f:
+        f.write(json.dumps(line) + "\n")
+
+
 class GeneratorThread(QThread):
-    """Polls the generator's current settings once a second. Read-only: it only sends queries."""
+    """Polls the generator's settings once a second. It only sends queries until set_cw() or rf_off() queues a
+    command. Those commands run here, in this thread, so the connection to the generator is never shared."""
     polled = pyqtSignal(dict)
-    failed = pyqtSignal(str)
+    failed = pyqtSignal(str)    # the connection could not be made or was lost
+    rejected = pyqtSignal(str)  # the generator refused a command; RF was switched off
 
     def __init__(self, ip):
         super().__init__()
         self.ip = ip
         self.stop_flag = threading.Event()
+        self.commands = queue.Queue()
+        self.rf_from_window = False  # RF was switched on from this window, so it is switched off on the way out
+        self.last = (None, None)     # frequency and power of the last Set
+
+    def set_cw(self, freq_hz, power_dbm):
+        self.commands.put(("on", freq_hz, power_dbm))
+
+    def rf_off(self):
+        self.commands.put(("off", None, None))
+
+    @staticmethod
+    def _send(sma, command):
+        sma.write(command)
+        err = sma.query("SYSTem:ERRor?").strip()
+        if not err.startswith("0"):
+            raise RuntimeError(f"{command!r} rejected: {err}")
+
+    def _run_command(self, sma, kind, freq_hz, power_dbm):
+        try:
+            self._send(sma, "OUTPut:STATe OFF")  # nothing is output while the new settings go in
+            if kind == "on":
+                self._send(sma, "SOURce:FREQuency:MODE CW")
+                self._send(sma, "SOURce:POWer:MODE CW")
+                self._send(sma, f"SOURce:FREQuency:CW {freq_hz:.0f}")
+                self._send(sma, f"SOURce:POWer:LEVel {power_dbm}")
+                self._send(sma, "OUTPut:STATe ON")
+                self.rf_from_window, self.last = True, (freq_hz, power_dbm)
+                log_event("on", freq_hz, power_dbm)
+            else:
+                self.rf_from_window = False
+                log_event("off", *self.last)
+        except RuntimeError as e:
+            sma.write("OUTPut:STATe OFF")
+            self.rf_from_window = False
+            self.rejected.emit(f"{e}; RF is off")
 
     def run(self):
         try:
@@ -79,11 +132,20 @@ class GeneratorThread(QThread):
                     "freq_hz": float(sma.query("SOURce:FREQuency:CW?")),
                     "power_dbm": float(sma.query("SOURce:POWer:LEVel?")),
                 })
-                self.stop_flag.wait(1.0)
+                try:
+                    command = self.commands.get(timeout=1.0)  # waits up to a second, so a command acts at once
+                except queue.Empty:
+                    continue
+                self._run_command(sma, *command)
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
         finally:
-            sma.close()
+            with contextlib.suppress(Exception):
+                if self.rf_from_window:
+                    sma.write("OUTPut:STATe OFF")
+                    log_event("off", *self.last)
+            with contextlib.suppress(Exception):
+                sma.close()
 
 
 def _spin(box, lo, hi, value, decimals, suffix):
@@ -134,6 +196,14 @@ class MainWindow(QMainWindow):
         self.gen_ip = QLineEdit(GENERATOR_IP)
         self.gen_ip.setFixedWidth(110)
         self.gen_label = QLabel("")
+        self.set_freq = _spin(QDoubleSpinBox(), 0.1, 5300, 213.0, 4, " MHz")
+        self.set_power = _spin(QDoubleSpinBox(), -110, MAX_POWER_DBM, -40.0, 1, " dBm")
+        self.set_btn = QPushButton("Set and RF on")
+        self.off_btn = QPushButton("RF off")
+        self.gen_msg = QLabel("")
+        self.set_btn.clicked.connect(self.set_generator)
+        self.off_btn.clicked.connect(self.generator_off)
+        self.set_controls(False)
 
         self.plot = pg.PlotWidget(background=SURFACE)
         self.plot.setLabel("bottom", "frequency (MHz)")
@@ -171,10 +241,15 @@ class MainWindow(QMainWindow):
         info.addWidget(self.status, 1)
         info.addWidget(self.saved)
         info.addWidget(self.peak)
+        ctrl = QHBoxLayout()
+        for w in (QLabel("set generator"), self.set_freq, self.set_power, self.set_btn, self.off_btn):
+            ctrl.addWidget(w)
+        ctrl.addWidget(self.gen_msg, 1)
         root = QVBoxLayout()
         root.addLayout(bar)
         root.addLayout(info)
         root.addWidget(self.gen_label)
+        root.addLayout(ctrl)
         root.addWidget(self.tabs, 1)
         central = QWidget()
         central.setLayout(root)
@@ -216,6 +291,7 @@ class MainWindow(QMainWindow):
             self.gen_worker = GeneratorThread(self.gen_ip.text().strip())
             self.gen_worker.polled.connect(self.on_generator)
             self.gen_worker.failed.connect(self.on_generator_failed)
+            self.gen_worker.rejected.connect(self.gen_msg.setText)
             self.gen_worker.start()
         else:
             self.gen_note = ""
@@ -241,15 +317,33 @@ class MainWindow(QMainWindow):
             self.gen_worker.stop_flag.set()
             self.gen_worker.wait(5000)
         self.gen, self.gen_note = None, ""
+        self.set_controls(False)
+        self.gen_msg.setText("")
         self.show_generator()
 
     def on_generator(self, reading):
         self.gen = reading
+        self.set_controls(True)
         self.show_generator()
 
     def on_generator_failed(self, msg):
         self.gen, self.gen_note = None, f"generator: not reachable ({msg})"
+        self.set_controls(False)
         self.show_generator()
+
+    def set_controls(self, enabled):
+        for w in (self.set_freq, self.set_power, self.set_btn, self.off_btn):
+            w.setEnabled(enabled)
+
+    def set_generator(self):
+        if self.gen_worker and self.gen_worker.isRunning():
+            self.gen_msg.setText("")
+            self.gen_worker.set_cw(self.set_freq.value() * 1e6, self.set_power.value())
+
+    def generator_off(self):
+        if self.gen_worker and self.gen_worker.isRunning():
+            self.gen_msg.setText("")
+            self.gen_worker.rf_off()
 
     def power_text(self, dbm):
         return f"{dbm:.1f} dBm" if self.unit.currentText() == "dBm" else f"{10 ** (dbm / 10):.3g} mW"
