@@ -56,6 +56,7 @@ def _number(token):
 
 class TinySA:
     def __init__(self, port=None, tries=5):
+        self._rbw_hz = None  # last RBW sent, so repeated sweeps do not resend it
         candidates = [port] if port else find_ports()
         if not candidates:
             seen = ", ".join(f"{p.device} ({p.description})" for p in serial.tools.list_ports.comports()) or "none"
@@ -87,13 +88,15 @@ class TinySA:
         while not buf.rstrip().endswith(b"ch>"):
             if time.monotonic() > end:
                 raise TimeoutError(f"tinySA did not answer {text!r}")
-            buf += self.ser.read(4096)
+            buf += self.ser.read(max(1, self.ser.in_waiting))  # read(4096) would wait out the whole port timeout
         lines = buf.decode(errors="replace").splitlines()[1:]
         return [l.strip() for l in lines if l.strip() and not l.startswith("ch>")]
 
     def read(self, center_hz, span_hz, n=500, rbw_hz=10e3):
         """One sweep on an n-point grid centered on center_hz. Returns [(bin, freq_hz, dbm, mw)]."""
-        self.cmd(f"rbw {rbw_hz / 1e3:g}")
+        if rbw_hz != self._rbw_hz:
+            self.cmd(f"rbw {rbw_hz / 1e3:g}")
+            self._rbw_hz = rbw_hz
         grid = np.linspace(center_hz - span_hz / 2, center_hz + span_hz / 2, n)
         pts = []
         for idx in np.array_split(np.arange(n), -(-n // MAX_SCAN)):
