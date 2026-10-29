@@ -49,26 +49,44 @@ def complete(profile):
     return all(k in profile for k in KEYS.values())
 
 
+def send(sma, command):
+    """Write one SCPI command; fail with the generator's own error text if it rejects it."""
+    print(f"  > {command}")
+    sma.write(command)
+    err = sma.query("SYSTem:ERRor?").strip()
+    if not err.startswith("0"):
+        raise RuntimeError(f"{command!r} rejected: {err}")
+
+
+def ask(sma, command):
+    """Query the generator; name the command if it never answers."""
+    print(f"  > {command}")
+    try:
+        return sma.query(command).strip()
+    except pyvisa.VisaIOError as e:
+        raise RuntimeError(f"{command!r} got no answer: {e}") from e
+
+
 def apply_profile(sma, profile):
     """Load the lists with RF off, then start one pass of the list. Returns the pass duration in s."""
     n = len(profile["freq"])
     if not (n == len(profile["pow"]) == len(profile["dwel"])) or n == 0:
         raise ValueError(f"list lengths differ: freq {n}, pow {len(profile['pow'])}, dwel {len(profile['dwel'])}")
-    sma.write("OUTPut:STATe OFF")
-    sma.write("SOURce:FREQuency:MODE CW")
-    sma.write(f'SOURce:LIST:SELect "{LIST_NAME}"')
-    sma.write("SOURce:LIST:FREQuency " + ",".join(f"{v:.0f}" for v in profile["freq"]))
-    sma.write("SOURce:LIST:POWer " + ",".join(f"{v}" for v in profile["pow"]))
-    sma.write("SOURce:LIST:DWELl " + ",".join(f"{v}" for v in profile["dwel"]))
+    send(sma, "*CLS")
+    send(sma, "OUTPut:STATe OFF")
+    send(sma, "SOURce:FREQuency:MODE CW")
+    send(sma, f'SOURce:LIST:SELect "{LIST_NAME}"')
+    send(sma, "SOURce:LIST:FREQuency " + ",".join(f"{v:.0f}" for v in profile["freq"]))
+    send(sma, "SOURce:LIST:POWer " + ",".join(f"{v}" for v in profile["pow"]))
+    send(sma, "SOURce:LIST:DWELl " + ",".join(f"{v}" for v in profile["dwel"]))
     for q in ("FREQuency", "POWer", "DWELl"):
-        if int(sma.query(f"SOURce:LIST:{q}:POINts?")) != n:
+        if int(ask(sma, f"SOURce:LIST:{q}:POINts?")) != n:
             raise RuntimeError(f"generator holds the wrong number of {q} points")
-    sma.write("SOURce:LIST:MODE AUTO")
-    sma.write("SOURce:LIST:TRIGger:SOURce SINGle")  # one pass per trigger, no repeat
-    sma.write("SOURce:FREQuency:MODE LIST")
-    sma.write("OUTPut:STATe ON")
-    sma.query("*OPC?")  # list loaded, waiting for the trigger
-    sma.write("SOURce:LIST:TRIGger:EXECute")
+    send(sma, "SOURce:LIST:MODE AUTO")
+    send(sma, "SOURce:LIST:TRIGger:SOURce SINGle")  # one pass per trigger, no repeat
+    send(sma, "SOURce:FREQuency:MODE LIST")
+    send(sma, "OUTPut:STATe ON")
+    send(sma, "SOURce:LIST:TRIGger:EXECute")
     return sum(profile["dwel"])
 
 
