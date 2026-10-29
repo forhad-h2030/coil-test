@@ -32,9 +32,12 @@ def grid_for(freqs_hz):
 
 
 class Monitor:
-    def __init__(self, port=None, rbw_hz=RBW_HZ):
+    def __init__(self, port=None, rbw_hz=RBW_HZ, on_sweep=None, verbose=True):
+        """on_sweep(t_start, t_end, rows) is called after every sweep; verbose=False turns the printout off."""
         self.sa = TinySA(port)
         self.rbw_hz = rbw_hz
+        self.on_sweep = on_sweep
+        self.verbose = verbose
         self._go = threading.Event()
         self._cancel = threading.Event()
         self._thread = None
@@ -72,7 +75,8 @@ class Monitor:
         self._go.wait()
         if self._cancel.is_set():
             return
-        print(f"tinySA: generator started {self.start:%H:%M:%S.%f}"[:-3])
+        if self.verbose:
+            print(f"tinySA: generator started {self.start:%H:%M:%S.%f}"[:-3])
         sweep = 0
         while not self._cancel.is_set() and time.perf_counter() - self.t0 < duration_s:
             t_a = time.perf_counter() - self.t0
@@ -83,6 +87,9 @@ class Monitor:
                 return
             t_b = time.perf_counter() - self.t0
             sweep += 1
-            print(f"tinySA sweep {sweep}  t={t_a:.3f}-{t_b:.3f} s")
-            for _, f, d, mw in rows:
-                print(f"  {f / 1e6:10.4f} MHz {d:8.2f} dBm {mw:11.4g} mW")
+            if self.on_sweep:
+                self.on_sweep(t_a, t_b, rows)
+            if self.verbose:
+                print(f"tinySA sweep {sweep}  t={t_a:.3f}-{t_b:.3f} s")
+                for _, f, d, mw in rows:
+                    print(f"  {f / 1e6:10.4f} MHz {d:8.2f} dBm {mw:11.4g} mW")
