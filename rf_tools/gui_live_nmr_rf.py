@@ -18,7 +18,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton, QSpinBox,
+    QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton, QSpinBox,
     QSplitter, QVBoxLayout, QDoubleSpinBox, QWidget,
 )
 
@@ -28,7 +28,10 @@ from lanl_events import read_events, read_latest  # noqa: E402
 from gui_live_spectrum import MainWindow as SpectrumWindow  # noqa: E402
 
 # ---------------------------------------------------------------- defaults (the Defaults button restores them)
-DATA_DIR = Path("/Users/spin/UVA-Lab-Software/LANL-System/rssmt/data/config")  # where the VI writes its run files
+DATA_ROOTS = [  # the first one that exists is searched, day subfolders included (data_2026/27/QCV....csv)
+    Path(r"\\PHYS-NUC6\Users\Ptgroup\Desktop\data_2026"),  # the NMR computer, seen from the lab PC
+    Path("/Users/spin/UVA-Lab-Software/LANL-System/rssmt/data/config"),  # the same files on the Mac
+]
 REF_FILE = HERE.parent / "plotting" / "NMRave_noRF.csv"  # default baseline: one no-RF NMR event
 REF_EVENT = 0  # when REF_FILE is missing, this 0-based event of the run is the baseline
 POLL_S = 1.0  # seconds between checks of the run file
@@ -38,16 +41,33 @@ BASE_COLOR, EVENT_COLOR = "#2a78d6", "#eb6834"  # categorical slots 1 and 2, val
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
 
 
-def find_run(text, folder=DATA_DIR):
-    """The run file for a path, a run number (digits in the file name) or, when empty, the newest run file.
-    The ...AVE.csv averages are never runs: a run number matches both files, and the average has no events."""
+def data_root():
+    """The first folder of DATA_ROOTS that can be reached, or None."""
+    return next((p for p in DATA_ROOTS if p.is_dir()), None)
+
+
+def find_run(text, root=None):
+    """The run file for a path, a run number (digits in the file name) or, when empty, the newest run file under
+    the data folder, day subfolders included. The ...AVE.csv averages are never runs: a run number matches both
+    files, and the average has no events."""
     text = text.strip()
     if text and Path(text).is_file():
         return Path(text)
+    root = root or data_root()
+    if root is None:
+        return None
     pattern = f"*{text}*.csv" if text else "QCV*.csv"
-    hits = [p for p in sorted(Path(folder).glob(pattern), key=lambda p: p.stat().st_mtime)
-            if not p.stem.upper().endswith("AVE")]
-    return hits[-1] if hits else None
+    hits = [p for p in root.rglob(pattern) if not p.stem.upper().endswith("AVE")]
+    return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
+
+
+def find_baseline():
+    """Default baseline file: REF_FILE, else the newest *noRF*.csv under the data folder, else None."""
+    if REF_FILE.is_file():
+        return REF_FILE
+    root = data_root()
+    hits = list(root.rglob("*noRF*.csv")) if root else []
+    return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
 
 
 def read_baseline_file(path):
@@ -66,6 +86,7 @@ class NmrThread(QThread):
         super().__init__()
         self.event_text, self.base_file, self.base_event, self.poll_s = event_text, base_file, base_event, poll_s
         self.stop_flag = threading.Event()
+        self.hint = ""  # why the file is not usable yet, shown while waiting
 
     def _wait_for(self, what, ready):
         """Poll until ready() returns something other than None. Returns None if stopped first."""
@@ -73,7 +94,7 @@ class NmrThread(QThread):
             got = ready()
             if got is not None:
                 return got
-            self.note.emit(f"waiting for {what} ...")
+            self.note.emit(f"waiting for {what} ..." + (f"   ({self.hint})" if self.hint else ""))
             self.stop_flag.wait(max(self.poll_s, 1.0))
         return None
 
@@ -91,6 +112,8 @@ class NmrThread(QThread):
                         events = read_events(path)[0] if path.stat().st_size else []
                     except (OSError, ValueError):  # file busy or mid-write
                         return None
+                    self.hint = "" if events or not path.stat().st_size else \
+                        f"{path.name} holds no NMR events: is it a run file like QCV....csv?"
                     return events[self.base_event]["amp"] if len(events) > self.base_event else None
                 base = self._wait_for(f"event {self.base_event} of the run", event_amp)
                 if base is None:
@@ -103,6 +126,9 @@ class NmrThread(QThread):
                 except (OSError, ValueError) as e:  # file busy or mid-write: try again next time
                     self.note.emit(f"read failed, retrying: {e}")
                     ev = None
+                if ev is None and last_id is None:
+                    self.note.emit(f"{path.name}: no complete NMR event yet (needs two events; "
+                                   "is it a run file like QCV....csv?)")
                 if ev is not None:
                     if len(ev["amp"]) != len(base):
                         self.failed.emit(f"the baseline has {len(base)} points, the run has {len(ev['amp'])}")
@@ -138,9 +164,8 @@ class NmrPanel(QWidget):
         self.event_edit = QLineEdit()
         self.event_edit.setPlaceholderText("run file, a run number, or empty for the newest run file")
         self.event_btn = QPushButton("Browse...")
-        self.base_mode = QComboBox()
-        self.base_mode.addItems(["file", "event of the run"])
         self.base_edit = QLineEdit()
+        self.base_edit.setPlaceholderText("no-RF baseline file (leave empty to use an event of the run instead)")
         self.base_btn = QPushButton("Browse...")
         self.base_event = QSpinBox()
         self.base_event.setRange(0, 100000)
@@ -156,7 +181,6 @@ class NmrPanel(QWidget):
 
         self.event_btn.clicked.connect(self.browse_event)
         self.base_btn.clicked.connect(self.browse_base)
-        self.base_mode.currentTextChanged.connect(self.apply_mode)
         self.defaults_btn.clicked.connect(self.defaults)
         self.start_btn.clicked.connect(self.start)
         self.stop_btn.clicked.connect(self.stop)
@@ -177,14 +201,20 @@ class NmrPanel(QWidget):
             row1.addWidget(w)
         row1.setStretch(1, 1)
         row2 = QHBoxLayout()
-        for w in (QLabel("baseline"), self.base_mode, self.base_edit, self.base_btn, QLabel("event"), self.base_event,
-                  QLabel("poll"), self.poll, self.defaults_btn, self.start_btn, self.stop_btn):
+        for w in (QLabel("baseline file"), self.base_edit, self.base_btn):
             row2.addWidget(w)
-        row2.setStretch(2, 1)
+        row2.setStretch(1, 1)
+        row3 = QHBoxLayout()
+        for w in (QLabel("no baseline file: use event"), self.base_event, QLabel("of the run"), QLabel("poll"), self.poll):
+            row3.addWidget(w)
+        row3.addStretch(1)
+        for w in (self.defaults_btn, self.start_btn, self.stop_btn):
+            row3.addWidget(w)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.addLayout(row1)
         root.addLayout(row2)
+        root.addLayout(row3)
         root.addWidget(self.status)
         root.addWidget(self.top, 3)
         root.addWidget(self.bottom, 2)
@@ -197,24 +227,13 @@ class NmrPanel(QWidget):
     def defaults(self):
         newest = find_run("")
         self.event_edit.setText(str(newest) if newest else "")
-        if REF_FILE.is_file():
-            self.base_mode.setCurrentText("file")
-            self.base_edit.setText(str(REF_FILE))
-        else:
-            self.base_mode.setCurrentText("event of the run")
-            self.base_edit.setText("")
+        base = find_baseline()
+        self.base_edit.setText(str(base) if base else "")
         self.base_event.setValue(REF_EVENT)
         self.poll.setValue(POLL_S)
-        self.apply_mode()
-
-    def apply_mode(self, *_):
-        from_file = self.base_mode.currentText() == "file"
-        self.base_edit.setEnabled(from_file)
-        self.base_btn.setEnabled(from_file)
-        self.base_event.setEnabled(not from_file)
 
     def browse(self, edit, title):
-        start = edit.text() or str(DATA_DIR if DATA_DIR.is_dir() else HERE)
+        start = edit.text() or str(data_root() or HERE)
         path, _ = QFileDialog.getOpenFileName(self, title, start, "CSV files (*.csv);;All files (*)")
         if path:
             edit.setText(path)
@@ -228,19 +247,14 @@ class NmrPanel(QWidget):
     def set_running(self, running):
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
-        for w in (self.event_edit, self.event_btn, self.base_mode, self.poll, self.defaults_btn):
+        for w in (self.event_edit, self.event_btn, self.base_edit, self.base_btn, self.base_event, self.poll,
+                  self.defaults_btn):
             w.setEnabled(not running)
-        if running:
-            for w in (self.base_edit, self.base_btn, self.base_event):
-                w.setEnabled(False)
-        else:
-            self.apply_mode()
 
     def start(self):
-        from_file = self.base_mode.currentText() == "file"
-        base_file = self.base_edit.text().strip() if from_file else None
-        if from_file and not Path(base_file or "").is_file():
-            self.status.setText("baseline file not found")
+        base_file = self.base_edit.text().strip() or None
+        if base_file and not Path(base_file).is_file():
+            self.status.setText(f"baseline file not found: {base_file}")
             return
         self.shown = 0
         for c in (self.base_curve, self.event_curve, self.diff_curve):
