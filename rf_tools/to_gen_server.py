@@ -128,6 +128,28 @@ def read_lines(soc, stop):
             yield raw.decode(errors="replace")
 
 
+def open_monitor(on_sweep, verbose, wait_s=10):
+    """Open the tinySA, or give up after wait_s and return None: setting power does not need it, and a USB serial
+    port that stopped answering can block a call forever, which no try/except would catch."""
+    from tinySA_monitor import Monitor  # opened now, so nothing is opened while a profile plays
+    result = {}
+
+    def work():
+        try:
+            result["monitor"] = Monitor(on_sweep=on_sweep, verbose=verbose, tries=2)
+        except Exception as e:
+            result["error"] = e
+
+    t = threading.Thread(target=work, daemon=True)  # daemon, so a hung open cannot keep the program alive
+    t.start()
+    t.join(wait_s)
+    if "monitor" in result:
+        print("Connected to tinySA")
+        return result["monitor"]
+    print(f"tinySA NOT connected, running without measurements: {result.get('error', f'no answer in {wait_s} s')}")
+    return None
+
+
 def serve(host, port, use_tinysa=True, on_event=None, stop=None):
     """Run the server until stop is set (or Ctrl+C). on_event(kind, data) reports what is happening:
         status   text      where the server is: waiting, loading, playing, ...
@@ -144,13 +166,8 @@ def serve(host, port, use_tinysa=True, on_event=None, stop=None):
     print(f"Connected to RF Gen: {sma.query('*IDN?').strip()}")
     monitor = None
     if use_tinysa:
-        from tinySA_monitor import Monitor  # opened now, so nothing is opened while a profile plays
-        try:
-            monitor = Monitor(on_sweep=lambda t0, t1, rows: emit("sweep", {"t0": t0, "t1": t1, "rows": rows}),
-                              verbose=on_event is None, tries=2)
-            print("Connected to tinySA")
-        except Exception as e:  # setting power does not need the tinySA, so go on without measurements
-            print(f"tinySA NOT connected, running without measurements: {e}")
+        monitor = open_monitor(lambda t0, t1, rows: emit("sweep", {"t0": t0, "t1": t1, "rows": rows}), on_event is None)
+        if not monitor:
             emit("status", "tinySA not connected, running without measurements")
 
     def started():  # runs right after the trigger is written
