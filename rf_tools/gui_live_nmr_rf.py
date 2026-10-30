@@ -5,8 +5,8 @@ Top: the two NMR rows of plotting/live_nmr_event.py. Row 1 is the baseline and t
 difference. The event file is a run file that the VI keeps appending to; only its end is re-read every poll.
 Pick the event file and the baseline with Browse, or press Defaults. The baseline is either a single no-RF event file
 (a ...AVE.csv or NMRave_noRF.csv: four header lines, then one amplitude per line) or one event of the run itself.
-Bottom: gui_live_spectrum.py unchanged, the live tinySA power per frequency bin (with its generator readout and Set
-controls). Watching the NMR file and the tinySA sweeps start and stop separately.
+Bottom: gui_live_spectrum.py unchanged, the live tinySA power per frequency bin (with its generator readout; it only
+reads). Watching the NMR file and the tinySA sweeps start and stop separately.
 The NMR files are only read, never written.
 """
 import sys
@@ -26,8 +26,8 @@ HERE = Path(__file__).resolve().parent
 PLOTTING = HERE.parent / "plotting"
 sys.path.insert(0, str(PLOTTING))  # lanl_events.py (the run-file reader) lives there
 from lanl_events import read_events, read_latest  # noqa: E402
-from gaussian_fit import fit_gaussian  # noqa: E402
-from gui_live_spectrum import FitMarks, MainWindow as SpectrumWindow  # noqa: E402
+from peak_widths import peak_widths  # noqa: E402
+from gui_live_spectrum import MainWindow as SpectrumWindow, WidthMarks  # noqa: E402
 
 # ---------------------------------------------------------------- defaults (the Defaults button restores them)
 DATA_ROOTS = [  # the first one that exists is searched, day subfolders included (data_2026/27/QCV....csv)
@@ -39,7 +39,7 @@ REF_EVENT = 0  # when REF_FILE is missing, this 0-based event of the run is the 
 POLL_S = 1.0  # seconds between checks of the run file
 STALE_S = 5.0  # warn when no new event arrived for this long
 # ------------------------------------------------------------------------------------------------------------
-FIT_WAITING = "Gaussian fit of the dip: waiting for an event"
+FIT_WAITING = "Dip widths: waiting for an event"
 BASE_COLOR, EVENT_COLOR = "#2a78d6", "#eb6834"  # categorical slots 1 and 2, validated on the surface below
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
 
@@ -231,9 +231,8 @@ class NmrPanel(QWidget):
         self.bottom.setXLink(self.top)
         self.bottom.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen(INK_2, width=1)))
         self.diff_curve = self.bottom.plot(pen=pg.mkPen(INK, width=2))
-        self.fit_curve = self.bottom.plot(pen=pg.mkPen(EVENT_COLOR, width=2, style=Qt.PenStyle.DashLine))
-        self.fit_label = QLabel(FIT_WAITING)
-        self.fit_marks = FitMarks(self.bottom)  # the -3 dB bar and the sigma bar on the difference plot
+        self.widths_label = QLabel(FIT_WAITING)
+        self.marks = WidthMarks(self.bottom)  # the width bars on the difference plot
 
         def file_row(label, edit, button):
             row = QHBoxLayout()
@@ -257,7 +256,7 @@ class NmrPanel(QWidget):
         root.addLayout(row2)
         root.addLayout(row3)
         root.addWidget(self.status)
-        root.addWidget(self.fit_label)
+        root.addWidget(self.widths_label)
         root.addWidget(self.top, 3)
         root.addWidget(self.bottom, 2)
 
@@ -293,10 +292,10 @@ class NmrPanel(QWidget):
             self.show_status(f"FAILED: baseline file not found: {base_file}", error=True)
             return
         self.shown = 0
-        for c in (self.base_curve, self.event_curve, self.diff_curve, self.fit_curve):
+        for c in (self.base_curve, self.event_curve, self.diff_curve):
             c.setData([], [])
-        self.fit_marks.clear()
-        self.fit_label.setText(FIT_WAITING)
+        self.marks.clear()
+        self.widths_label.setText(FIT_WAITING)
         self.worker = NmrThread(self.event_edit.text(), base_file, self.base_event.value(), self.poll.value())
         self.worker.got_event.connect(self.on_event)
         self.worker.note.connect(lambda msg: self.show_status(msg))
@@ -331,27 +330,26 @@ class NmrPanel(QWidget):
         self.base_curve.setData(d["freq"], d["base"])
         self.event_curve.setData(d["freq"], d["amp"])
         self.diff_curve.setData(d["freq"], diff)
-        self.show_fit(d["freq"], diff)
+        self.show_widths(d["freq"], diff)
         self.top.setTitle(f"Latest NMR event and baseline ({d['base_name']})", color=INK_2, size="10pt")
         self.last_text = (f"{d['file']}   latest event {d['ident'][0]:.0f}-{d['ident'][1]:.4f}   "
                           f"max |diff| {np.abs(diff).max():.4f} V")
         self.last_new, self.shown = time.monotonic(), self.shown + 1
         self.tick()
 
-    def show_fit(self, freq, diff):
-        fit = fit_gaussian(freq, diff)
-        if fit is None:
-            self.fit_curve.setData([], [])
-            self.fit_marks.clear()
-            self.fit_label.setText("Gaussian fit of the dip: no clear Gaussian in event minus baseline")
+    def show_widths(self, freq, diff):
+        """Sigma, FWHM and the -3 dB width of the dip in event minus baseline (an amplitude), measured on the data."""
+        w = peak_widths(freq, diff, "amplitude")
+        if w is None:
+            self.marks.clear()
+            self.widths_label.setText("Dip widths: no clear dip in event minus baseline")
             return
-        gauss = np.exp(-(freq - fit["f0"]) ** 2 / (2 * fit["sigma"] ** 2))
-        self.fit_curve.setData(freq, fit["offset"] + fit["amp"] * gauss)
-        self.fit_marks.show(fit, fit["bw3"], 2 ** -0.5)
-        self.fit_label.setText(
-            f"Gaussian fit of the dip:   center {fit['f0']:.4f} MHz   sigma {fit['sigma'] * 1e3:.2f} kHz   "
-            f"BW at -3 dB {fit['bw3'] * 1e3:.2f} kHz   (FWHM, -6 dB: {fit['fwhm'] * 1e3:.2f} kHz)   "
-            f"depth {fit['amp'] * 1e3:.2f} mV   S/N {fit['snr']:.0f}")
+        self.marks.show(w)
+        kHz = lambda v: "wider than the span" if v is None else f"{v * 1e3:.2f} kHz"
+        self.widths_label.setText(
+            f"Dip widths:   center {w['center']:.4f} MHz   sigma {kHz(w['sigma']) if w['sigma'] is not None else 'n/a'}"
+            f"   BW at -3 dB {kHz(w['bw3'])}   FWHM (-6 dB) {kHz(w['fwhm'])}   "
+            f"depth {w['peak'] * 1e3:.2f} mV   S/N {w['snr']:.0f}")
 
     def tick(self):
         if not self.last_text or not self.shown or not (self.worker and self.worker.isRunning()):
