@@ -5,8 +5,8 @@ Top: the two NMR rows of plotting/live_nmr_event.py. Row 1 is the baseline and t
 difference. The event file is a run file that the VI keeps appending to; only its end is re-read every poll.
 Pick the event file and the baseline with Browse, or press Defaults. The baseline is either a single no-RF event file
 (a ...AVE.csv or NMRave_noRF.csv: four header lines, then one amplitude per line) or one event of the run itself.
-Bottom: gui_live_spectrum.py unchanged, the live tinySA power per frequency bin (with its generator readout; it only
-reads). Watching the NMR file and the tinySA sweeps start and stop separately.
+Bottom: live tinySA RF power versus frequency, with its generator readout. Watching the NMR file and tinySA sweeps
+start and stop separately.
 The NMR files are only read, never written.
 """
 import sys
@@ -341,7 +341,7 @@ class NmrPanel(QWidget):
         self.tick()
 
     def show_widths(self, freq, diff):
-        """Sigma, FWHM and the -3 dB width of the dip in event minus baseline (an amplitude), measured on the data."""
+        """Measure the dip widths in event minus baseline (an amplitude)."""
         w = peak_widths(freq, diff, "amplitude", smooth=True)  # dense and noisy: smoothed over 3 points
         if w is None:
             self.marks.clear()
@@ -350,7 +350,7 @@ class NmrPanel(QWidget):
         self.marks.show(w)
         kHz = lambda v: "wider than the span" if v is None else f"{v * 1e3:.2f} kHz"
         self.widths_label.setText(
-            f"Dip widths:   center {w['center']:.4f} MHz   sigma {kHz(w['sigma']) if w['sigma'] is not None else 'n/a'}"
+            f"Dip widths:   center {w['center']:.4f} MHz"
             f"   BW at -3 dB {kHz(w['bw3'])}   FWHM (-6 dB) {kHz(w['fwhm'])}   "
             f"depth {w['peak'] * 1e3:.2f} mV   S/N {w['snr']:.0f}")
 

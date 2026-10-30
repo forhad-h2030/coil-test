@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Live power vs frequency bin from the tinySA (for example on the loop). Sweeps run continuously until Stop.
+"""Live RF power versus frequency from the tinySA. Sweeps run continuously until Stop.
     python gui_live_spectrum.py
-Each sweep gives one reading per bin: the level through the RBW filter at that frequency, not integrated over the bin.
+Each sweep gives one power sample at each frequency, measured through the RBW filter.
 Averaging is done in linear power (mW) over the last N sweeps, then shown in the chosen unit.
 The settings are read at Start, so stop and start again to change them. The tinySA serial port can only be used by
 one program at a time (not together with to_gen_server.py or gui_generator_profile.py).
-Save CSV (off by default) writes every raw sweep, one row per bin, to data/spectrum_<time>.csv.
+Save CSV (off by default) writes every raw sweep, one row per frequency sample, to data/spectrum_<time>.csv.
 Read generator (on by default) asks the generator for its current output state, mode, frequency and power once a
 second and shows them with a marker on the plot. It needs no server. If the generator cannot be reached, the tinySA
 part keeps working. It only sends queries.
@@ -41,7 +41,7 @@ from tinySA_IO import TinySA
 
 LINE_COLOR = "#2a78d6"  # categorical slot 1, validated on the surface below
 GEN_COLOR = "#eb6834"  # categorical slot 2: the generator marker
-BW_COLOR, FWHM_COLOR, SIGMA_COLOR = "#1a8f5a", "#b8860b", "#8a4fd0"  # bars: -3 dB width, FWHM, sigma
+BW_COLOR, FWHM_COLOR = "#1a8f5a", "#b8860b"  # -3 dB width and FWHM
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
 GENERATOR_IP = "192.168.24.10"
 LIST_REREAD_S = 30  # the list is read again at least this often, and at once when its length changes
@@ -168,7 +168,7 @@ class WidthMarks:
             text.setVisible(False)
 
     def show(self, w, data_y=lambda v: v, view_y=lambda v: v):
-        """Show the half-height interval; sigma remains a numeric readout, not a plotted width."""
+        """Show the half-height interval as a shaded band and threshold bar."""
         self.clear()
         interval = w["fwhm_x"] or w["bw3_x"]
         if interval:
@@ -197,7 +197,7 @@ def _spin(box, lo, hi, value, decimals, suffix):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Power vs frequency bin")
+        self.setWindowTitle("RF power vs frequency")
         self.worker = None
         self.history = deque(maxlen=1)
         self.count = 0
@@ -218,6 +218,10 @@ class MainWindow(QMainWindow):
         self.unit = QComboBox()
         self.unit.addItems(["dBm", "mW"])
         self.unit.currentTextChanged.connect(self.apply_unit)
+        self.y_scale = QComboBox()
+        self.y_scale.addItems(["linear", "log"])
+        self.y_scale.setToolTip("Choose the y-axis scale when displaying power in mW. dBm is shown on a linear dBm axis.")
+        self.y_scale.currentTextChanged.connect(self.apply_unit)
         self.save = QCheckBox("save CSV")  # off by default
         self.save.toggled.connect(self.toggle_save)
         self.csv_file = self.csv_writer = None
@@ -281,8 +285,8 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(lambda _: self.refresh_generator())
 
         bar = QHBoxLayout()
-        for text, w in (("center", self.center), ("span", self.span), ("bins", self.bins), ("RBW", self.rbw),
-                        ("average", self.average), ("power in", self.unit)):
+        for text, w in (("center", self.center), ("span", self.span), ("points", self.bins), ("RBW", self.rbw),
+                        ("average", self.average), ("power in", self.unit), ("y scale", self.y_scale)):
             bar.addWidget(QLabel(text))
             bar.addWidget(w)
         bar.addWidget(self.save)
@@ -317,8 +321,16 @@ class MainWindow(QMainWindow):
 
     def apply_unit(self, *_):
         unit = self.unit.currentText()
-        self.plot.setLabel("left", f"power ({unit})", **{"font-size": "14pt"})
-        self.plot.setLogMode(y=unit == "mW")  # mW spans decades, so the axis is logarithmic
+        in_mw = unit == "mW"
+        if not in_mw and self.y_scale.currentText() != "linear":
+            self.y_scale.blockSignals(True)
+            self.y_scale.setCurrentText("linear")
+            self.y_scale.blockSignals(False)
+        self.y_scale.setEnabled(in_mw)
+        scale = self.y_scale.currentText() if in_mw else "linear"
+        axis_unit = f"{unit}, {scale} scale" if in_mw else unit
+        self.plot.setLabel("left", f"power ({axis_unit})", **{"font-size": "14pt"})
+        self.plot.setLogMode(y=in_mw and scale == "log")
         self.refresh_generator()
 
     def set_running(self, running):
@@ -389,20 +401,19 @@ class MainWindow(QMainWindow):
         self.show_trace() if self.history else self.show_generator()  # show_trace shows the generator too
 
     def show_resolution(self):
-        """RBW and bin spacing describe different things: the RBW is how wide each reading looks (the filter), the
-        spacing is how far apart the readings are. A peak narrower than either is not resolved."""
+        """RBW is the filter width; frequency step is the spacing between samples."""
         if self.history and len(self.freqs_mhz) > 1:  # the grid of the sweep on screen
             spacing = abs(self.freqs_mhz[1] - self.freqs_mhz[0]) * 1e3
         else:
             spacing = self.span.value() / (self.bins.value() - 1)
         rbw = self.rbw.value()
         if spacing > rbw * 1.01:
-            hint = "bins wider than the RBW: a narrow signal can fall between bins"
+            hint = "frequency step exceeds RBW: a narrow signal can fall between samples"
         elif spacing < rbw / 1.01:
-            hint = "bins closer than the RBW: neighbouring bins overlap"
+            hint = "frequency step is finer than RBW: neighbouring samples overlap"
         else:
-            hint = "bins as wide as the RBW"
-        self.res_label.setText(f"RBW {rbw:g} kHz   bin spacing {spacing:.2f} kHz")
+            hint = "frequency step is about the same as RBW"
+        self.res_label.setText(f"RBW {rbw:g} kHz   frequency step {spacing:.2f} kHz")
         self.res_label.setToolTip(hint)
 
     def power_loss(self):
@@ -554,24 +565,25 @@ class MainWindow(QMainWindow):
                     self.table.setItem(r, c, QTableWidgetItem(text))
 
     def show_widths(self, mw):
-        """Sigma, FWHM and the -3 dB width of the peak, measured on the linear power (no fit, no assumed shape)."""
+        """Measure the FWHM / -3 dB width of the peak on linear power."""
         w = peak_widths(self.freqs_mhz, mw, "power", min_snr=10)  # at least 10 noise widths above the floor
         if w is None:
             self.marks.clear()
             self.widths_info.setText("Peak widths: no clear peak")
             return
         in_mw = self.unit.currentText() == "mW"
+        log_scale = in_mw and self.y_scale.currentText() == "log"
         self.marks.show(w, (lambda v: v) if in_mw else (lambda v: 10 * np.log10(np.maximum(v, 1e-30))),
-                        np.log10 if in_mw else (lambda v: v))
+                        np.log10 if log_scale else (lambda v: v))
         spacing = abs(self.freqs_mhz[1] - self.freqs_mhz[0])
         kHz = lambda v: "wider than the span" if v is None else f"{v * 1e3:.2f} kHz"
         note = ""
         if w["points"] < 3:
-            note = f"only {w['points']} bin above half height; limited by {spacing * 1e3:.0f} kHz spacing"
-        sigma_text = kHz(w["sigma"]) if w["sigma"] is not None else "n/a"
+            count = w["points"]
+            sample_word = "sample" if count == 1 else "samples"
+            note = f"only {count} frequency {sample_word} above half height; limited by {spacing * 1e3:.0f} kHz step"
         parts = [
             f'<span style="color:{INK_2}">Center <b>{w["center"]:.4f} MHz</b></span>',
-            f'<span style="color:{SIGMA_COLOR}">σ <b>{sigma_text}</b></span>',
             f'<span style="color:{BW_COLOR}; font-weight:600">BW at −3 dB <b>{kHz(w["fwhm"])}</b></span>',
         ]
         if note:
