@@ -145,9 +145,13 @@ def serve(host, port, use_tinysa=True, on_event=None, stop=None):
     monitor = None
     if use_tinysa:
         from tinySA_monitor import Monitor  # opened now, so nothing is opened while a profile plays
-        monitor = Monitor(on_sweep=lambda t0, t1, rows: emit("sweep", {"t0": t0, "t1": t1, "rows": rows}),
-                          verbose=on_event is None)
-        print("Connected to tinySA")
+        try:
+            monitor = Monitor(on_sweep=lambda t0, t1, rows: emit("sweep", {"t0": t0, "t1": t1, "rows": rows}),
+                              verbose=on_event is None, tries=2)
+            print("Connected to tinySA")
+        except Exception as e:  # setting power does not need the tinySA, so go on without measurements
+            print(f"tinySA NOT connected, running without measurements: {e}")
+            emit("status", "tinySA not connected, running without measurements")
 
     def started():  # runs right after the trigger is written
         if monitor:

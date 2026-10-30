@@ -32,9 +32,10 @@ def grid_for(freqs_hz):
 
 
 class Monitor:
-    def __init__(self, port=None, rbw_hz=RBW_HZ, on_sweep=None, verbose=True):
-        """on_sweep(t_start, t_end, rows) is called after every sweep; verbose=False turns the printout off."""
-        self.sa = TinySA(port)
+    def __init__(self, port=None, rbw_hz=RBW_HZ, on_sweep=None, verbose=True, tries=5):
+        """on_sweep(t_start, t_end, rows) is called after every sweep; verbose=False turns the printout off.
+        Raises when the tinySA cannot be opened (after `tries` attempts)."""
+        self.sa = TinySA(port, tries)
         self.rbw_hz = rbw_hz
         self.on_sweep = on_sweep
         self.verbose = verbose
