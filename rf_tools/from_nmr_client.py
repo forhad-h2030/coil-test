@@ -39,7 +39,7 @@ def main():
         soc.close()
 
     except ConnectionRefusedError:
-        print("Connection refused.")
+        print(f"Connection refused by {host_svr}:{port_svr} ({socket.gethostbyname(host_svr)}). Is to_gen_server.py running and printing 'Wait on'?")
 
 
 if __name__ == "__main__":
