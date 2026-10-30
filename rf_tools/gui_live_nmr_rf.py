@@ -339,7 +339,7 @@ class NmrPanel(QWidget):
 
     def show_widths(self, freq, diff):
         """Sigma, FWHM and the -3 dB width of the dip in event minus baseline (an amplitude), measured on the data."""
-        w = peak_widths(freq, diff, "amplitude")
+        w = peak_widths(freq, diff, "amplitude", smooth=True)  # dense and noisy: smoothed over 3 points
         if w is None:
             self.marks.clear()
             self.widths_label.setText("Dip widths: no clear dip in event minus baseline")

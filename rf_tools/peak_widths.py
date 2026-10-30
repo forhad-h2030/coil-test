@@ -3,18 +3,17 @@ import numpy as np
 LOBE = 0.05  # the points above this fraction of the peak make up the lobe that sigma is computed over
 
 
-SMOOTH_FROM = 100  # curves with at least this many points are smoothed over 3 points first (noise); coarse ones are not
-
-
-def peak_widths(x, y, kind="power", min_snr=5.0):
-    """The largest peak or dip of y, or None if it is under min_snr noise widths above the floor."""
+def peak_widths(x, y, kind="power", min_snr=5.0, smooth=False):
+    """The largest peak or dip of y, or None if it is under min_snr noise widths above the floor. smooth=True
+    averages every 3 neighbouring points first (for a dense, noisy curve such as an NMR dip). Leave it off when the
+    peak is only a few points wide, as on a tinySA trace: smoothing would lower and widen it."""
     x, y = np.asarray(x, float), np.asarray(y, float)
     n = max(len(y) // 10, 2)
     edge = np.r_[y[:n], y[-n:]]
     floor = np.median(edge)
     noise = 1.4826 * np.median(np.abs(edge - floor)) or 1e-12
     r = y - floor
-    rs = np.convolve(r, np.ones(3) / 3, mode="same") if len(y) >= SMOOTH_FROM else r
+    rs = np.convolve(r, np.ones(3) / 3, mode="same") if smooth else r
     k = int(np.argmax(np.abs(rs)))
     if abs(rs[k]) < min_snr * noise:
         return None
