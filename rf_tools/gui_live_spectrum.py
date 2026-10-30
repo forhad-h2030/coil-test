@@ -220,7 +220,9 @@ class MainWindow(QMainWindow):
         self.start_btn.clicked.connect(self.start)
         self.stop_btn.clicked.connect(self.stop)
         self.status = QLabel("stopped")
+        self.status.setStyleSheet(f"color: {INK_2}; font-size: 10pt;")
         self.peak = QLabel("")
+        self.peak.setStyleSheet(f"color: {LINE_COLOR}; font-size: 12pt; font-weight: 600;")
         self.saved = QLabel("")
         self.use_gen = QCheckBox("read generator")
         self.use_gen.setChecked(True)
@@ -247,6 +249,7 @@ class MainWindow(QMainWindow):
         self.plot.addItem(self.gen_line)
         self.marks = WidthMarks(self.plot)
         self.widths_info = QLabel("")
+        self.widths_info.setStyleSheet("font-size: 12pt;")
         ring = pg.mkPen(SURFACE, width=2)
         self.set_points = self.plot.plot(pen=None, symbol="d", symbolSize=11, symbolBrush=GEN_COLOR, symbolPen=ring)
         self.step_point = self.plot.plot(pen=None, symbol="o", symbolSize=17, symbolBrush=None,
@@ -555,11 +558,16 @@ class MainWindow(QMainWindow):
         kHz = lambda v: "wider than the span" if v is None else f"{v * 1e3:.2f} kHz"
         note = ""
         if w["points"] < 3:
-            note = f"   (only {w['points']} bin above half height: limited by the {spacing * 1e3:.0f} kHz bins, " \
-                   "use more bins or a smaller span)"
-        self.widths_info.setText(
-            f"Peak widths:   center {w['center']:.4f} MHz   sigma {kHz(w['sigma']) if w['sigma'] is not None else 'n/a'}"
-            f"   FWHM = BW at -3 dB {kHz(w['fwhm'])}   peak {10 * np.log10(w['peak'] + w['floor']):.1f} dBm{note}")
+            note = f"only {w['points']} bin above half height; limited by {spacing * 1e3:.0f} kHz spacing"
+        sigma_text = kHz(w["sigma"]) if w["sigma"] is not None else "n/a"
+        parts = [
+            f'<span style="color:{INK_2}">Center <b>{w["center"]:.4f} MHz</b></span>',
+            f'<span style="color:{SIGMA_COLOR}">σ <b>{sigma_text}</b></span>',
+            f'<span style="color:{BW_COLOR}; font-weight:600">BW at −3 dB <b>{kHz(w["fwhm"])}</b></span>',
+        ]
+        if note:
+            parts.append(f'<span style="color:#9a6700; font-weight:600">{note}</span>')
+        self.widths_info.setText(" &nbsp;&nbsp;|&nbsp;&nbsp; ".join(parts))
 
     def closeEvent(self, event):
         if self.worker and self.worker.isRunning():
