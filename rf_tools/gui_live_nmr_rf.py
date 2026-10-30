@@ -38,6 +38,7 @@ REF_EVENT = 0  # when REF_FILE is missing, this 0-based event of the run is the 
 POLL_S = 1.0  # seconds between checks of the run file
 STALE_S = 5.0  # warn when no new event arrived for this long
 # ------------------------------------------------------------------------------------------------------------
+BW_COLOR, SIGMA_COLOR = "#1a8f5a", "#8a4fd0"  # the -3 dB bar and the sigma bar on the difference plot
 FIT_WAITING = "Gaussian fit of the dip: waiting for an event"
 BASE_COLOR, EVENT_COLOR = "#2a78d6", "#eb6834"  # categorical slots 1 and 2, validated on the surface below
 SURFACE, INK, INK_2 = "#fcfcfb", "#0b0b0b", "#52514e"
@@ -277,6 +278,14 @@ class NmrPanel(QWidget):
         self.diff_curve = self.bottom.plot(pen=pg.mkPen(INK, width=2))
         self.fit_curve = self.bottom.plot(pen=pg.mkPen(EVENT_COLOR, width=2, style=Qt.PenStyle.DashLine))
         self.fit_label = QLabel(FIT_WAITING)
+        # what the fit found, drawn on the difference plot: a bar for the -3 dB width and one for center +- sigma
+        self.bw_bar = self.bottom.plot(pen=pg.mkPen(BW_COLOR, width=3))
+        self.sigma_bar = self.bottom.plot(pen=pg.mkPen(SIGMA_COLOR, width=3))
+        self.bw_text = pg.TextItem(color=BW_COLOR, anchor=(0, 0.5))  # text right of its bar
+        self.sigma_text = pg.TextItem(color=SIGMA_COLOR, anchor=(1, 0.5))  # text left of its bar
+        for t in (self.bw_text, self.sigma_text):
+            self.bottom.addItem(t)
+        self.clear_fit_marks()
 
         def file_row(label, edit, button):
             row = QHBoxLayout()
@@ -338,6 +347,7 @@ class NmrPanel(QWidget):
         self.shown = 0
         for c in (self.base_curve, self.event_curve, self.diff_curve, self.fit_curve):
             c.setData([], [])
+        self.clear_fit_marks()
         self.fit_label.setText(FIT_WAITING)
         self.worker = NmrThread(self.event_edit.text(), base_file, self.base_event.value(), self.poll.value())
         self.worker.got_event.connect(self.on_event)
@@ -380,14 +390,29 @@ class NmrPanel(QWidget):
         self.last_new, self.shown = time.monotonic(), self.shown + 1
         self.tick()
 
+    def clear_fit_marks(self):
+        for c in (self.bw_bar, self.sigma_bar):
+            c.setData([], [])
+        for t in (self.bw_text, self.sigma_text):
+            t.setVisible(False)
+
     def show_fit(self, freq, diff):
         fit = fit_gaussian(freq, diff)
         if fit is None:
             self.fit_curve.setData([], [])
+            self.clear_fit_marks()
             self.fit_label.setText("Gaussian fit of the dip: no clear Gaussian in event minus baseline")
             return
         gauss = np.exp(-(freq - fit["f0"]) ** 2 / (2 * fit["sigma"] ** 2))
         self.fit_curve.setData(freq, fit["offset"] + fit["amp"] * gauss)
+        for bar, text, half, level, label, side in (
+                (self.bw_bar, self.bw_text, fit["bw3"] / 2, 2 ** -0.5, f"-3 dB: {fit['bw3'] * 1e3:.1f} kHz", 1),
+                (self.sigma_bar, self.sigma_text, fit["sigma"], np.exp(-0.5), f"\u00b1\u03c3: {fit['sigma'] * 1e3:.1f} kHz", -1)):
+            y = fit["offset"] + fit["amp"] * level
+            bar.setData([fit["f0"] - half, fit["f0"] + half], [y, y])
+            text.setText(label)
+            text.setPos(fit["f0"] + side * half, y)
+            text.setVisible(True)
         self.fit_label.setText(
             f"Gaussian fit of the dip:   center {fit['f0']:.4f} MHz   sigma {fit['sigma'] * 1e3:.2f} kHz   "
             f"BW at -3 dB {fit['bw3'] * 1e3:.2f} kHz   (FWHM, -6 dB: {fit['fwhm'] * 1e3:.2f} kHz)   "
