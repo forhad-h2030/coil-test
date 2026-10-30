@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
     QPushButton, QSpinBox,
@@ -142,42 +143,48 @@ class GeneratorThread(QThread):
 
 
 class WidthMarks:
-    """The widths of a peak (see peak_widths.py) drawn on a plot as horizontal bars with a label at one end: the
-    -3 dB width (right), the FWHM (right, only when it differs from the -3 dB width) and center +- sigma (left)."""
+    """Show the FWHM interval as a shaded band with vertical edges and a threshold bar."""
 
     def __init__(self, plot):
+        self.region = pg.LinearRegionItem(
+            values=(0, 1), orientation="vertical", movable=False,
+            brush=pg.mkBrush(90, 120, 105, 35),
+            pen=pg.mkPen(BW_COLOR, width=1, style=Qt.PenStyle.DashLine),
+        )
+        self.region.setZValue(-20)
+        plot.addItem(self.region, ignoreBounds=True)
         self.bars, self.texts = [], []
-        for color, anchor in ((BW_COLOR, (0, 0.5)), (FWHM_COLOR, (0, 0.5)), (SIGMA_COLOR, (1, 0.5))):
+        for color in (BW_COLOR, FWHM_COLOR):
             self.bars.append(plot.plot(pen=pg.mkPen(color, width=3)))
-            self.texts.append(pg.TextItem(color=color, anchor=anchor))
+            self.texts.append(pg.TextItem(color=color, anchor=(0, 0.5)))
             plot.addItem(self.texts[-1])
         self.clear()
 
     def clear(self):
+        self.region.setVisible(False)
         for bar in self.bars:
             bar.setData([], [])
-        for t in self.texts:
-            t.setVisible(False)
+        for text in self.texts:
+            text.setVisible(False)
 
     def show(self, w, data_y=lambda v: v, view_y=lambda v: v):
-        """w: the dict of peak_widths. data_y maps a value (in the units of the curve) to the plotted data,
-        view_y maps that to the axis position (log axes)."""
+        """Show the half-height interval; sigma remains a numeric readout, not a plotted width."""
         self.clear()
+        interval = w["fwhm_x"] or w["bw3_x"]
+        if interval:
+            self.region.setRegion(interval)
+            self.region.setVisible(True)
         bars = []
         if w["bw3_x"]:
-            bars.append((0, w["bw3_x"], w["level3"], f"-3 dB: {w['bw3'] * 1e3:.1f} kHz", 1))
-        if w["fwhm_x"] and w["level3"] != 0.5:  # for a power the FWHM is the -3 dB width
-            bars.append((1, w["fwhm_x"], 0.5, f"FWHM: {w['fwhm'] * 1e3:.1f} kHz", 1))
-        if w["sigma"] is not None:
-            bars.append((2, (w["center"] - w["sigma"], w["center"] + w["sigma"]), 0.25,
-                         f"\u00b1\u03c3: {w['sigma'] * 1e3:.1f} kHz", -1))
-        for i, (lo, hi), level, label, side in bars:
+            bars.append((0, w["bw3_x"], w["level3"], f"−3 dB: {w['bw3'] * 1e3:.1f} kHz"))
+        if w["fwhm_x"] and w["level3"] != 0.5:
+            bars.append((1, w["fwhm_x"], 0.5, f"FWHM: {w['fwhm'] * 1e3:.1f} kHz"))
+        for i, (lo, hi), level, label in bars:
             y = data_y(w["floor"] + w["peak"] * level)
             self.bars[i].setData([lo, hi], [y, y])
             self.texts[i].setText(label)
-            self.texts[i].setPos(hi if side > 0 else lo, view_y(y))
+            self.texts[i].setPos(hi, view_y(y))
             self.texts[i].setVisible(True)
-
 
 def _spin(box, lo, hi, value, decimals, suffix):
     box.setRange(lo, hi)
@@ -236,11 +243,13 @@ class MainWindow(QMainWindow):
         self.res_label = QLabel("")
 
         self.plot = pg.PlotWidget(background=SURFACE)
-        self.plot.setLabel("bottom", "frequency (MHz)")
+        self.plot.setLabel("bottom", "frequency (MHz)", **{"font-size": "14pt"})
         self.plot.showGrid(x=True, y=True, alpha=0.15)
         for axis in ("bottom", "left"):
-            self.plot.getAxis(axis).setPen(INK_2)
-            self.plot.getAxis(axis).setTextPen(INK_2)
+            axis_item = self.plot.getAxis(axis)
+            axis_item.setPen(INK_2)
+            axis_item.setTextPen(INK_2)
+            axis_item.setStyle(tickFont=QFont("Arial", 12))
         self.plot.getAxis("left").enableAutoSIPrefix(False)
         self.curve = self.plot.plot(pen=pg.mkPen(LINE_COLOR, width=2))
         self.gen_line = pg.InfiniteLine(angle=90, pen=pg.mkPen(GEN_COLOR, width=2, style=Qt.PenStyle.DashLine),
@@ -308,7 +317,7 @@ class MainWindow(QMainWindow):
 
     def apply_unit(self, *_):
         unit = self.unit.currentText()
-        self.plot.setLabel("left", f"power ({unit})")
+        self.plot.setLabel("left", f"power ({unit})", **{"font-size": "14pt"})
         self.plot.setLogMode(y=unit == "mW")  # mW spans decades, so the axis is logarithmic
         self.refresh_generator()
 

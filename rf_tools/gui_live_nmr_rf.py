@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton, QSpinBox,
     QSplitter, QVBoxLayout, QDoubleSpinBox, QWidget,
@@ -182,11 +183,13 @@ class NmrThread(QThread):
 def make_plot(title):
     w = pg.PlotWidget(background=SURFACE)
     w.setTitle(title, color=INK_2, size="10pt")
-    w.setLabel("left", "Amplitude (V)")
+    w.setLabel("left", "Amplitude (V)", **{"font-size": "14pt"})
     w.showGrid(x=True, y=True, alpha=0.15)
     for axis in ("bottom", "left"):
-        w.getAxis(axis).setPen(INK_2)
-        w.getAxis(axis).setTextPen(INK_2)
+        axis_item = w.getAxis(axis)
+        axis_item.setPen(INK_2)
+        axis_item.setTextPen(INK_2)
+        axis_item.setStyle(tickFont=QFont("Arial", 12))
     w.getAxis("left").enableAutoSIPrefix(False)
     return w
 
@@ -227,7 +230,7 @@ class NmrPanel(QWidget):
         self.base_curve = self.top.plot(pen=pg.mkPen(BASE_COLOR, width=2), name="no-RF baseline")
         self.event_curve = self.top.plot(pen=pg.mkPen(EVENT_COLOR, width=2), name="latest NMR event (with RF)")
         self.bottom = make_plot("Latest NMR event minus baseline")
-        self.bottom.setLabel("bottom", "Frequency (MHz)")
+        self.bottom.setLabel("bottom", "Frequency (MHz)", **{"font-size": "14pt"})
         self.bottom.setXLink(self.top)
         self.bottom.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen(INK_2, width=1)))
         self.diff_curve = self.bottom.plot(pen=pg.mkPen(INK, width=2))
