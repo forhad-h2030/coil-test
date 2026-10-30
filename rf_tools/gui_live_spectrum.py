@@ -11,9 +11,8 @@ second and shows them with a marker on the plot. It needs no server. If the gene
 part keeps working. It only sends queries.
 When the generator is in LIST mode (a profile from to_gen_server.py), the list is read too (frequency, power and
 dwell of every step, and the index the generator reports) and shown with the measurement at each step: markers on the
-plot and a Profile tab. The generator power is a setpoint, so "path loss" (dB between the generator and the tinySA
-input: cables, attenuators) turns it into the level the tinySA should read: set minus loss. The list queries are
-best effort: one the generator refuses is skipped and said so.
+plot and a Profile tab. The generator power is a setpoint; the difference between its setting and the tinySA reading includes any losses
+in cables and attenuators. The list queries are best effort: one the generator refuses is skipped and said so.
 This window only reads. It never sets the generator (to hold a CW tone use set_cw_tone.py, for a profile use
 to_gen_server.py).
 """
@@ -206,11 +205,11 @@ class MainWindow(QMainWindow):
         self.gen_note = ""
 
         self.center = _spin(QDoubleSpinBox(), 0.1, 5300, 213.0, 4, " MHz")
-        self.span = _spin(QDoubleSpinBox(), 1, 100000, 400, 1, " kHz")
+        self.span = _spin(QDoubleSpinBox(), 1, 100000, 100, 1, " kHz")
         self.bins = QSpinBox()
         self.bins.setRange(2, 2000)
-        self.bins.setValue(41)
-        self.rbw = _spin(QDoubleSpinBox(), 0.2, 850, 10, 1, " kHz")
+        self.bins.setValue(101)
+        self.rbw = _spin(QDoubleSpinBox(), 0.2, 850, 1, 1, " kHz")
         self.average = QSpinBox()
         self.average.setRange(1, 200)
         self.average.setValue(1)
@@ -240,10 +239,6 @@ class MainWindow(QMainWindow):
         self.gen_ip = QLineEdit(GENERATOR_IP)
         self.gen_ip.setFixedWidth(110)
         self.gen_label = QLabel("")
-        self.loss = _spin(QDoubleSpinBox(), 0, 100, 0.0, 1, " dB")  # generator to tinySA: cables, attenuators
-        self.loss.setToolTip("Attenuation between the generator output and the tinySA input. The tinySA should read "
-                             "the generator power minus this.")
-        self.loss.valueChanged.connect(lambda _: self.refresh_generator())
         self.res_label = QLabel("")
 
         self.plot = pg.PlotWidget(background=SURFACE)
@@ -272,9 +267,9 @@ class MainWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(["MHz", "dBm", "mW"])
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.profile_table = QTableWidget(0, 7)
+        self.profile_table = QTableWidget(0, 6)
         self.profile_table.setHorizontalHeaderLabels(
-            ["step", "MHz", "set dBm", "expected dBm", "measured dBm", "diff dB", "dwell ms"])
+            ["step", "MHz", "set dBm", "measured dBm", "measured−set dB", "dwell ms"])
         self.profile_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.profile_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.profile_table.verticalHeader().setVisible(False)
@@ -297,8 +292,6 @@ class MainWindow(QMainWindow):
         info = QHBoxLayout()
         info.addWidget(self.status, 1)
         info.addWidget(self.res_label)
-        info.addWidget(QLabel("path loss"))
-        info.addWidget(self.loss)
         info.addWidget(self.saved)
         info.addWidget(self.peak)
         root = QVBoxLayout()
@@ -416,12 +409,8 @@ class MainWindow(QMainWindow):
         self.res_label.setText(f"RBW {rbw:g} kHz   frequency step {spacing:.2f} kHz")
         self.res_label.setToolTip(hint)
 
-    def power_loss(self):
-        return self.loss.value()
-
     def step_rows(self, g):
-        """One row per list step: (MHz, set dBm, expected dBm at the tinySA, measured dBm or None, dwell s or None)
-        and the index of the step the generator reports (or None). The measured level is the bin nearest the step."""
+        """One row per list step: (MHz, set dBm, measured dBm or None, dwell s or None), plus current index."""
         lst = g["list"]
         if not lst or not lst["freq_hz"] or not lst["power_dbm"] or len(lst["freq_hz"]) != len(lst["power_dbm"]):
             return [], None
@@ -435,7 +424,7 @@ class MainWindow(QMainWindow):
                 if abs(self.freqs_mhz[i] - f / 1e6) <= spacing:
                     measured = 10 * np.log10(mw[i])
             dwell = lst["dwell_s"][k] if lst["dwell_s"] and k < len(lst["dwell_s"]) else None
-            rows.append((f / 1e6, p, p - self.power_loss(), measured, dwell))
+            rows.append((f / 1e6, p, measured, dwell))
         index = lst["index"] if lst["index"] is not None and 0 <= lst["index"] < len(rows) else None
         return rows, index
 
@@ -448,35 +437,31 @@ class MainWindow(QMainWindow):
             self.gen_label.setText(self.gen_note)
             return
         state = "RF on" if g["rf_on"] else "RF off"
-        loss = self.power_loss()
         if g["mode"] == "LIST":
             self.gen_label.setText(f"generator: {state}   LIST mode   {self.list_text(g)}")
             return
         if g["mode"] != "CW":
             self.gen_label.setText(f"generator: {state}   {g['mode']} mode")
             return
-        expect = g["power_dbm"] - loss
         text = f"generator: {state}   CW {g['freq_hz'] / 1e6:.4f} MHz   set {self.power_text(g['power_dbm'])}"
-        if loss:
-            text += f", tinySA should read {self.power_text(expect)}"
         if cw_on:
             self.gen_line.setValue(g["freq_hz"] / 1e6)
-            if self.history:  # measured level of the bin nearest the generator's frequency
+            if self.history:  # measured level of the frequency sample nearest the generator setting
                 mw = np.mean(self.history, axis=0)
                 i = int(np.argmin(np.abs(self.freqs_mhz * 1e6 - g["freq_hz"])))
                 spacing = abs(self.freqs_mhz[1] - self.freqs_mhz[0]) * 1e6 if len(mw) > 1 else 0
                 if abs(self.freqs_mhz[i] * 1e6 - g["freq_hz"]) <= spacing:
                     dbm = 10 * np.log10(mw[i])
-                    text += f"   measured {self.power_text(dbm)} ({dbm - expect:+.1f} dB)"
+                    text += f"   measured {self.power_text(dbm)} ({dbm - g['power_dbm']:+.1f} dB vs set)"
         self.gen_label.setText(text)
 
     def list_text(self, g):
-        """The generator's list in one line: how many steps, the ranges, the dwell and the step it reports."""
+        """The generator's list in one line: step count, frequency and power ranges, dwell and current step."""
         rows, index = self.step_rows(g)
         if not rows:
             return "its list could not be read (the generator refused the list queries)"
         f, p = [r[0] for r in rows], [r[1] for r in rows]
-        dwells = [r[4] for r in rows if r[4] is not None]
+        dwells = [r[3] for r in rows if r[3] is not None]
         dwell = "dwell unknown" if not dwells else (f"dwell {dwells[0] * 1e3:g} ms" if len(set(dwells)) == 1 else
                                                     f"dwell {min(dwells) * 1e3:g} to {max(dwells) * 1e3:g} ms")
         text = (f"{len(rows)} steps, {min(f):.4f} to {max(f):.4f} MHz, set {min(p):.1f} to {max(p):.1f} dBm, {dwell}")
@@ -484,30 +469,30 @@ class MainWindow(QMainWindow):
             return text + "   current step: not reported by the generator"
         r = rows[index]
         now = f"   step {index + 1} of {len(rows)} (index {index}): {r[0]:.4f} MHz, set {r[1]:.1f} dBm"
-        if r[4] is not None:
-            now += f", dwell {r[4] * 1e3:g} ms"
+        if r[3] is not None:
+            now += f", dwell {r[3] * 1e3:g} ms"
         return text + now
 
     def show_setpoints(self, g):
-        """The profile setpoints (set minus path loss, the level the tinySA should read) as markers on the plot,
-        and the table of steps with the measurement beside each."""
+        """Show generator setpoints and measured power beside each profile frequency."""
         rows, index = self.step_rows(g) if g and g.get("list") else ([], None)
         in_mw = self.unit.currentText() == "mW"
         conv = (lambda d: 10 ** (d / 10)) if in_mw else (lambda d: d)
         lo, hi = (self.freqs_mhz[0], self.freqs_mhz[-1]) if self.history else (
             self.center.value() - self.span.value() / 2e3, self.center.value() + self.span.value() / 2e3)
-        seen = [(r[0], conv(r[2])) for r in rows if lo <= r[0] <= hi]  # outside the span they would stretch the plot
+        seen = [(r[0], conv(r[1])) for r in rows if lo <= r[0] <= hi]
         self.set_points.setData(*zip(*seen)) if seen else self.set_points.setData([], [])
-        now = [(rows[index][0], conv(rows[index][2]))] if index is not None and lo <= rows[index][0] <= hi else []
+        now = [(rows[index][0], conv(rows[index][1]))] if index is not None and lo <= rows[index][0] <= hi else []
         self.step_point.setData(*zip(*now)) if now else self.step_point.setData([], [])
-        if self.tabs.currentWidget() is not self.profile_table:  # a long table is only refreshed while it is visible
+        if self.tabs.currentWidget() is not self.profile_table:
             return
         self.profile_table.setRowCount(len(rows))
         fmt = lambda v, f: "" if v is None else f.format(v)
-        for r, (f, p, expect, measured, dwell) in enumerate(rows):
-            diff = None if measured is None else measured - expect
-            cells = [str(r + 1) + (" <" if r == index else ""), f"{f:.4f}", f"{p:.1f}", f"{expect:.1f}",
-                     fmt(measured, "{:.1f}"), fmt(diff, "{:+.1f}"), fmt(None if dwell is None else dwell * 1e3, "{:g}")]
+        for r, (f, p, measured, dwell) in enumerate(rows):
+            diff = None if measured is None else measured - p
+            cells = [str(r + 1) + (" <" if r == index else ""), f"{f:.4f}", f"{p:.1f}",
+                     fmt(measured, "{:.1f}"), fmt(diff, "{:+.1f}"),
+                     fmt(None if dwell is None else dwell * 1e3, "{:g}")]
             for c, text in enumerate(cells):
                 item = QTableWidgetItem(text)
                 if r == index:
